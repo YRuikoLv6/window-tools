@@ -18,6 +18,25 @@ else:
     WEB_DIR = os.path.join(PACKAGE_DIR, "web")
 
 PROJECT_DIR = BASE_DIR
+
+
+def _resolve_icon() -> str:
+    """图标资源：冻结态优先 exe 同级（可被用户替换），其次内嵌目录。"""
+    candidates = []
+    if FROZEN:
+        candidates.append(os.path.join(BASE_DIR, "app.ico"))
+        candidates.append(os.path.join(getattr(sys, "_MEIPASS", PACKAGE_DIR),
+                                       "app.ico"))
+    else:
+        candidates.append(os.path.join(BASE_DIR, "app.ico"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return candidates[0] if candidates else ""
+
+
+ICON_PATH = _resolve_icon()
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")

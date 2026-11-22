@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import os
+import struct
 import sys
 import tempfile
 
@@ -16,7 +17,7 @@ import win32con
 from window_tools import __version__
 from window_tools.core.desktop_app import DesktopApp
 from window_tools.core.tool_manager import ToolManager
-from window_tools.paths import CONFIG_PATH, LOG_DIR
+from window_tools.paths import CONFIG_PATH, ICON_PATH, LOG_DIR
 from window_tools.tools.mouse_lock import MouseLockTool
 from window_tools.tools.window_layout import WindowLayoutTool
 from window_tools.utils import winapi
@@ -116,6 +117,10 @@ def selftest(log) -> int:
             and exit_store.get("mouse", {}).get("enabled") is False
         )
         checks.append(("退出自动解锁", exit_unlocked, "OK"))
+
+    icon_ok = os.path.isfile(ICON_PATH) and open(ICON_PATH, "rb").read(6) == \
+        struct.pack("<HHH", 0, 1, 7)
+    checks.append(("应用图标资源", icon_ok, os.path.basename(ICON_PATH)))
 
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:

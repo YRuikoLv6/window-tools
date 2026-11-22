@@ -22,8 +22,12 @@ import win32con
 import win32gui
 
 from .. import __version__
+from ..paths import ICON_PATH
 from ..ui import gdi
 from ..ui.gdi import C
+from ..ui.tray import (
+    TRAY_EXIT, TRAY_HIDE, TRAY_SHOW, TrayIcon, TrayMenu, WM_TRAYICON,
+)
 from ..utils import winapi
 
 ID_BASE = 100
@@ -60,6 +64,14 @@ def _kill_timer(hwnd: int, timer_id: int) -> None:
     _user32.KillTimer(hwnd, timer_id)
 
 
+def _try_foreground(hwnd: int) -> None:
+    """尽力把窗口置前；Windows 前台锁定可能导致失败，忽略即可。"""
+    try:
+        _user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+    except Exception:
+        pass
+
+
 class DesktopApp:
     def __init__(self, log, config, title: str = "窗口工具集合"):
         self.log = log
@@ -91,6 +103,9 @@ class DesktopApp:
         self._notice_lines: List[str] = []
         self._window_lines: List[str] = []
         self._metrics: List[Tuple[str, str, int]] = []
+
+        self.tray: TrayIcon | None = None
+        self.tray_menu: TrayMenu | None = None
 
     # -------------------------------------------------------- 对外接口 --
     def set_manager(self, manager) -> None:
@@ -193,6 +208,19 @@ class DesktopApp:
             0, class_name, f"{self.title} v{__version__}", style,
             left, top, width, height, 0, 0, wc.hInstance, None,
         )
+        self._apply_window_icon()
+
+        # 托盘图标：与窗口共用 ICO 资源，最小化后仍可快速唤出
+        try:
+            self.tray = TrayIcon(self.hwnd, ICON_PATH,
+                                 f"{self.title} v{__version__}")
+            if self.tray.add():
+                self.tray_menu = TrayMenu(self.hwnd, self._on_tray_command)
+                self.log.info("系统托盘图标已添加: %s", ICON_PATH)
+            else:
+                self.log.warning("系统托盘图标添加失败")
+        except Exception:
+            self.log.exception("系统托盘初始化失败")
 
         if self.manager:
             self.manager.load_all()
@@ -209,9 +237,66 @@ class DesktopApp:
         try:
             win32gui.PumpMessages()
         finally:
+            if self.tray:
+                self.tray.remove()
             if self.manager:
                 self.manager.unload_all()
             gdi.shutdown()
+
+    # -------------------------------------------------------- 托盘 ------
+    def _apply_window_icon(self) -> None:
+        """为窗口和任务栏设置大/小图标。"""
+        try:
+            big = win32gui.LoadImage(
+                0, ICON_PATH, win32con.IMAGE_ICON, 0, 0,
+                win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE,
+            )
+            small = win32gui.LoadImage(
+                0, ICON_PATH, win32con.IMAGE_ICON, 16, 16,
+                win32con.LR_LOADFROMFILE,
+            )
+            if big:
+                win32gui.SendMessage(self.hwnd, win32con.WM_SETICON, 1, big)
+            if small:
+                win32gui.SendMessage(self.hwnd, win32con.WM_SETICON, 0, small)
+        except Exception:
+            self.log.exception("设置窗口图标失败")
+
+    def _show_window(self) -> None:
+        if not self.hwnd:
+            return
+        win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+        win32gui.BringWindowToTop(self.hwnd)
+        _try_foreground(self.hwnd)
+        win32gui.InvalidateRect(self.hwnd, None, True)
+
+    def _hide_window(self) -> None:
+        if self.hwnd:
+            win32gui.ShowWindow(self.hwnd, win32con.SW_HIDE)
+
+    def _on_tray_command(self, cmd: int) -> None:
+        if cmd == TRAY_SHOW:
+            self._show_window()
+        elif cmd == TRAY_HIDE:
+            self._hide_window()
+        elif cmd == TRAY_EXIT:
+            if self.hwnd:
+                win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
+
+    def _handle_tray_message(self, lparam) -> None:
+        """处理托盘回调（双击显示/隐藏，右键弹出菜单）。"""
+        event = int(lparam) & 0xFFFF
+        if event == win32con.WM_LBUTTONDBLCLK:
+            if win32gui.IsWindowVisible(self.hwnd):
+                self._hide_window()
+            else:
+                self._show_window()
+        elif event == win32con.WM_RBUTTONUP:
+            if self.tray_menu:
+                try:
+                    self.tray_menu.show(win32gui.IsWindowVisible(self.hwnd))
+                except Exception:
+                    self.log.exception("托盘菜单弹出失败")
 
     # ------------------------------------------------------ 工具数据 ----
     def _alloc_id(self) -> int:
@@ -706,6 +791,10 @@ class DesktopApp:
     # -------------------------------------------------------- 消息处理 --
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         try:
+            if msg == WM_TRAYICON:
+                self._handle_tray_message(lparam)
+                return 0
+
             if msg == win32con.WM_PAINT:
                 self._paint(hwnd)
                 return 0

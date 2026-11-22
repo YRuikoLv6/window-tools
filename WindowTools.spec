@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置：单文件原生窗体 exe，数据写 exe 同级目录。"""
 
-datas = []
+datas = [("app.ico", ".")]
 
 hiddenimports = [
     "win32api",
@@ -33,6 +33,7 @@ exe = EXE(
     a.datas,
     [],
     name="WindowTools",
+    icon="app.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
