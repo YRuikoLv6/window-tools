@@ -9,6 +9,9 @@ hiddenimports = [
     "win32gui",
     "win32process",
     "pywintypes",
+    "win32com",
+    "win32com.client",
+    "pythoncom",
 ]
 
 a = Analysis(

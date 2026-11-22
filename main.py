@@ -122,6 +122,19 @@ def selftest(log) -> int:
         struct.pack("<HHH", 0, 1, 7)
     checks.append(("应用图标资源", icon_ok, os.path.basename(ICON_PATH)))
 
+    # 桌面快捷方式：写入临时目录验证 .lnk 生成与启动参数
+    from window_tools.utils import shortcut as sc_module
+    spec = sc_module.launch_spec()
+    spec_ok = bool(spec.get("target")) and os.path.isabs(spec["target"])
+    checks.append(("快捷方式启动参数", spec_ok,
+                   os.path.basename(spec.get("target", ""))))
+    with tempfile.TemporaryDirectory() as folder:
+        lnk = os.path.join(folder, "test.lnk")
+        made = sc_module.create_shortcut(lnk)
+        valid = (made.get("ok") and os.path.isfile(lnk)
+                 and open(lnk, "rb").read(4) == b"\x4c\x00\x00\x00")
+        checks.append(("快捷方式生成", bool(valid), "OK"))
+
     # 关闭确认框：出现时屏蔽背景点击，消失后恢复普通热点
     probe = DesktopApp.__new__(DesktopApp)
     probe._dialog = {"hotspots": []}
@@ -168,6 +181,7 @@ def main() -> int:
     config = JsonStore(CONFIG_PATH, {
         "general": {"auto_detect": True},
         "mouse": {"enabled": False},
+        "shortcut": {"asked": False, "remember": False, "create": False},
     })
 
     if args.selftest:

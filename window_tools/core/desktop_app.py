@@ -28,7 +28,7 @@ from ..ui.gdi import C
 from ..ui.tray import (
     TRAY_EXIT, TRAY_HIDE, TRAY_SHOW, TrayIcon, TrayMenu, WM_TRAYICON,
 )
-from ..utils import winapi
+from ..utils import shortcut, winapi
 
 ID_BASE = 100
 TIMER_REFRESH = 1
@@ -237,6 +237,7 @@ class DesktopApp:
         _set_timer(self.hwnd, TIMER_REFRESH, REFRESH_MS)
         self.log.info("原生自绘窗体已创建 (hwnd=%s)", self.hwnd)
         self.notify("窗体已启动，工具按钮已就绪")
+        self._maybe_ask_shortcut()
 
         try:
             win32gui.PumpMessages()
@@ -313,6 +314,77 @@ class DesktopApp:
         if self.hwnd:
             self.log.info("用户选择退出程序")
             win32gui.DestroyWindow(self.hwnd)
+
+    # -------------------------------------------- 桌面快捷方式询问/设置 --
+    def _maybe_ask_shortcut(self) -> None:
+        """启动后按需询问是否创建桌面快捷方式。"""
+        sc = self.config.get("shortcut", {}) or {}
+        if sc.get("asked") and sc.get("remember"):
+            return  # 用户已选择“保持选择”，不再询问
+        if self._dialog is not None:
+            return
+        self._dialog = {"kind": "shortcut", "hotspots": [], "keep": False}
+        self._invalidate()
+        self.log.info("启动询问：是否创建桌面快捷方式")
+
+    def _resolve_shortcut(self, create: bool) -> None:
+        """处理快捷方式询问结果，并按勾选状态持久化选择。"""
+        dialog = self._dialog or {}
+        keep = bool(dialog.get("keep", False))
+        sc = dict(self.config.get("shortcut", {}) or {})
+        sc["asked"] = True
+        sc["create"] = bool(create)
+        sc["remember"] = keep
+        self.config.data["shortcut"] = sc
+        self.config.save()
+        self._close_dialog()
+        self.log.info("快捷方式选择：create=%s remember=%s", create, keep)
+        if create:
+            self._create_shortcut_action()
+        if keep:
+            self.notify("已记住选择，以后不再询问")
+
+    def _create_shortcut_action(self) -> None:
+        """根据当前程序路径生成桌面快捷方式并反馈结果。"""
+        try:
+            result = shortcut.create_shortcut()
+        except Exception as exc:
+            self.log.exception("生成桌面快捷方式失败")
+            result = {"ok": False, "message": "生成失败：%s" % exc}
+        level = self.log.info if result.get("ok") else self.log.warning
+        level("桌面快捷方式：%s", result.get("message"))
+        self.notify(result.get("message", "快捷方式操作完成"))
+
+    def _show_settings_menu(self) -> None:
+        """标题栏设置按钮：弹出菜单（非卡片形式）。"""
+        menu = win32gui.CreatePopupMenu()
+        try:
+            exists = shortcut.shortcut_exists()
+            label = "更新桌面快捷方式" if exists else "生成桌面快捷方式"
+            win32gui.AppendMenu(menu, win32con.MF_STRING, 3001, label)
+            win32gui.AppendMenu(menu, win32con.MF_STRING, 3002,
+                                "重新询问快捷方式选择")
+            try:
+                _user32.SetForegroundWindow(ctypes.c_void_p(self.hwnd))
+            except Exception:
+                pass
+            pos = win32gui.GetCursorPos()
+            cmd = win32gui.TrackPopupMenu(
+                menu, win32con.TPM_RETURNCMD | win32con.TPM_RIGHTALIGN,
+                pos[0], pos[1], 0, self.hwnd, None,
+            )
+            win32gui.PostMessage(self.hwnd, win32con.WM_NULL, 0, 0)
+            if cmd == 3001:
+                self._create_shortcut_action()
+            elif cmd == 3002:
+                sc = dict(self.config.get("shortcut", {}) or {})
+                sc["asked"] = False
+                sc["remember"] = False
+                self.config.data["shortcut"] = sc
+                self.config.save()
+                self.notify("下次启动将重新询问快捷方式")
+        finally:
+            win32gui.DestroyMenu(menu)
 
     def _handle_tray_message(self, lparam) -> None:
         """处理托盘回调（双击显示/隐藏，右键弹出菜单）。"""
@@ -491,8 +563,20 @@ class DesktopApp:
         c.text("多显示器窗口布局守护 · 自绘界面", 62, 37, 280, 20, 11.5,
                gdi.argb(255, 255, 255, 195))
 
+        settings_rect = (w - 120, 17, 32, 32)
         min_rect = (w - 82, 17, 32, 32)
         close_rect = (w - 44, 17, 32, 32)
+        # 设置按钮（弹出菜单，不做卡片）
+        st_hover = self._hover == "settings"
+        st_press = self._pressed == "settings"
+        st_fill = gdi.argb(255, 255, 255, 58 if st_press else
+                           (42 if st_hover else 0))
+        if st_fill:
+            c.rounded(settings_rect[0], settings_rect[1], 32, 32, 7, st_fill)
+        c.text("设", settings_rect[0], settings_rect[1] - 1, 32, 34, 13,
+               gdi.argb(255, 255, 255), False, gdi.ALIGN_CENTER)
+        self._hotspots.append({"kind": "settings", "rect": settings_rect})
+
         for kind, rect, glyph in (("min", min_rect, "–"),
                                   ("close", close_rect, "×")):
             hovered = self._hover == kind
@@ -536,7 +620,89 @@ class DesktopApp:
                PAD, footer_y, w - 2 * PAD, FOOTER_H, 11.5, C.TEXT_FAINT)
 
         if self._dialog is not None:
-            self._draw_close_dialog(c, w, h)
+            if self._dialog.get("kind") == "shortcut":
+                self._draw_shortcut_dialog(c, w, h)
+            else:
+                self._draw_close_dialog(c, w, h)
+
+    def _draw_dialog_button(self, c, kind, label, tone, rect) -> None:
+        """通用对话框按钮：primary / danger / default。"""
+        x, y, bw, bh = rect
+        hovered = self._hover == kind
+        pressed = self._pressed == kind
+        if tone == "primary":
+            fill = C.PRIMARY_DARK if pressed else (
+                C.PRIMARY if hovered else C.PRIMARY)
+            border = None
+            color = gdi.argb(255, 255, 255)
+            bold = True
+        elif tone == "danger":
+            fill = C.DANGER_SOFT if hovered else C.CARD
+            border = C.DANGER
+            color = C.DANGER
+            bold = True
+        else:
+            fill = C.PRIMARY_SOFT if hovered else C.CARD_SOFT
+            border = C.BORDER
+            color = C.TEXT_SUB
+            bold = False
+        offset = 1 if pressed else 0
+        c.rounded(x + 1, y + 2, bw - 2, bh - 2, 9, C.SHADOW)
+        c.rounded(x, y + offset, bw, bh - 2, 9, fill, border)
+        c.text(label, x, y + offset, bw, bh - 2, 13, color, bold,
+               gdi.ALIGN_CENTER)
+        self._hotspots.append({"kind": kind, "rect": rect})
+
+    def _draw_shortcut_dialog(self, c, w: int, h: int) -> None:
+        """启动询问框：是否创建桌面快捷方式 + 保持选择勾选。"""
+        c.rect(0, 0, w, h, gdi.argb(130, 14, 22, 40))
+        dw, dh = 500, 292
+        dx = max(12, (w - dw) // 2)
+        dy = max(12, (h - dh) // 2)
+        c.rounded(dx, dy + 6, dw, dh, 18, gdi.argb(48, 12, 22, 42))
+        c.rounded(dx, dy, dw, dh, 18, C.CARD, C.BORDER)
+
+        c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
+        c.text("捷", dx + 24, dy + 23, 44, 46, 22, C.PRIMARY, True,
+               gdi.ALIGN_CENTER)
+        c.text("桌面快捷方式", dx + 80, dy + 22, dw - 104, 30, 18,
+               C.TEXT, True)
+        c.text("是否在桌面创建本程序的快捷方式？",
+               dx + 26, dy + 68, dw - 52, 24, 13, C.TEXT_SUB)
+        spec = shortcut.launch_spec()
+        c.text("目标：%s" % os.path.basename(spec["target"]),
+               dx + 26, dy + 94, dw - 52, 22, 11.5, C.TEXT_FAINT)
+
+        # 勾选框：保持当前选择，以后不再询问
+        keep = bool(self._dialog.get("keep", False))
+        kb_rect = (dx + 26, dy + 132, 20, 20)
+        kh = self._hover == "dlg_sc_keep"
+        c.rounded(kb_rect[0], kb_rect[1], 20, 20, 5,
+                  C.PRIMARY if keep else (C.CARD_SOFT if kh else C.CARD),
+                  C.PRIMARY if keep else C.BORDER)
+        if keep:
+            c.text("✓", kb_rect[0], kb_rect[1] - 2, 20, 22, 15,
+                   gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
+        c.text("保持当前选择，以后不再询问",
+               dx + 54, dy + 130, dw - 80, 24, 12.5, C.TEXT_SUB)
+        self._hotspots.append({"kind": "dlg_sc_keep", "rect": kb_rect})
+        # 整行可点
+        self._hotspots.append({
+            "kind": "dlg_sc_keep",
+            "rect": (dx + 26, dy + 128, dw - 52, 28),
+        })
+
+        c.rect(dx + 24, dy + 168, dw - 48, 1, C.DIVIDER)
+        gap = 12
+        bw = (dw - 48 - gap) // 2
+        by = dy + 192
+        bh = 46
+        self._draw_dialog_button(
+            c, "dlg_sc_skip", "暂不生成", "default",
+            (dx + 24, by, bw, bh))
+        self._draw_dialog_button(
+            c, "dlg_sc_create", "生成快捷方式", "primary",
+            (dx + 24 + bw + gap, by, bw, bh))
 
     def _draw_close_dialog(self, c, w: int, h: int) -> None:
         """自绘模态确认框：隐藏到托盘 / 退出程序 / 取消。"""
@@ -570,31 +736,8 @@ class DesktopApp:
         )
         for index, (kind, label, tone) in enumerate(options):
             bx = dx + 24 + index * (bw + gap)
-            rect = (bx, by, bw, bh)
-            hovered = self._hover == kind
-            pressed = self._pressed == kind
-            if tone == "primary":
-                fill = C.PRIMARY_DARK if pressed else (
-                    C.PRIMARY if hovered else C.PRIMARY)
-                border = None
-                color = gdi.argb(255, 255, 255)
-                bold = True
-            elif tone == "danger":
-                fill = C.DANGER_SOFT if hovered else C.CARD
-                border = C.DANGER
-                color = C.DANGER
-                bold = True
-            else:
-                fill = C.PRIMARY_SOFT if hovered else C.CARD_SOFT
-                border = C.BORDER
-                color = C.TEXT_SUB
-                bold = False
-            offset = 1 if pressed else 0
-            c.rounded(bx + 1, by + 2, bw - 2, bh - 2, 9, C.SHADOW)
-            c.rounded(bx, by + offset, bw, bh - 2, 9, fill, border)
-            c.text(label, bx, by + offset, bw, bh - 2, 13, color, bold,
-                   gdi.ALIGN_CENTER)
-            self._hotspots.append({"kind": kind, "rect": rect})
+            self._draw_dialog_button(c, kind, label, tone,
+                                     (bx, by, bw, bh))
 
     def _draw_tools(self, c, x: int, y: int, w: int, h: int) -> None:
         # 先测量总高度以支持滚动
@@ -947,6 +1090,16 @@ class DesktopApp:
                         self._hide_window()
                     elif kind == "dlg_exit":
                         self._exit_app()
+                    elif kind == "dlg_sc_keep":
+                        self._dialog["keep"] = not self._dialog.get(
+                            "keep", False)
+                        self._invalidate()
+                    elif kind == "dlg_sc_create":
+                        self._resolve_shortcut(True)
+                    elif kind == "dlg_sc_skip":
+                        self._resolve_shortcut(False)
+                    elif kind == "settings":
+                        self._show_settings_menu()
                     elif kind == "action":
                         threading.Thread(
                             target=self._run_action,
