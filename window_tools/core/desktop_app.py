@@ -30,6 +30,13 @@ from ..ui.tray import (
 )
 from ..utils import shortcut, winapi
 
+# 单实例唤醒协议：第二实例定位已有窗口后投递 WM_SHOWME，由已有实例显示窗口。
+# WM_TRAYICON 占用 WM_USER + 100，这里错开避免冲突。
+WM_SHOWME = win32con.WM_USER + 101
+WINDOW_CLASS = "WindowToolsDesktop"
+DEFAULT_TITLE = "窗口工具集合"
+WINDOW_TITLE = f"{DEFAULT_TITLE} v{__version__}"
+
 ID_BASE = 100
 TIMER_REFRESH = 1
 TIMER_DISPLAY = 2
@@ -70,6 +77,39 @@ def _try_foreground(hwnd: int) -> None:
         _user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
     except Exception:
         pass
+
+
+def wake_existing_window() -> bool:
+    """单实例场景：定位已有实例的窗口并请求其显示。
+
+    返回是否成功定位并投递消息。窗口隐藏到托盘后 FindWindow 仍能找到，
+    因为它只要求窗口存在、不要求可见。
+    """
+    hwnd = 0
+    try:
+        hwnd = win32gui.FindWindow(WINDOW_CLASS, None)
+    except Exception:
+        pass
+    if not hwnd:
+        # 兼容仍在运行的旧版本（类名含动态 PID）或窗口标题被定制的情况
+        try:
+            hwnd = win32gui.FindWindow(None, WINDOW_TITLE)
+        except Exception:
+            pass
+    if not hwnd:
+        return False
+    # 直接跨进程恢复显示：即使对方是旧版本、不认识 WM_SHOWME 也能被唤醒
+    try:
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.BringWindowToTop(hwnd)
+    except Exception:
+        pass
+    # 再投递消息，让新版本补做置前与通知（防御性，失败也不影响显示）
+    try:
+        win32gui.PostMessage(hwnd, WM_SHOWME, 0, 0)
+    except Exception:
+        pass
+    return True
 
 
 class DesktopApp:
@@ -182,7 +222,8 @@ class DesktopApp:
         self.scale = scale
         self.log.info("UI 缩放: %.2f (DPI=%s)", scale, dpi_x)
 
-        class_name = f"WindowToolsDesktop_{os.getpid()}"
+        # 固定类名：单实例由 Mutex 保证，便于第二实例据此定位已有窗口
+        class_name = WINDOW_CLASS
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = self._wnd_proc
         wc.lpszClassName = class_name
@@ -1032,6 +1073,13 @@ class DesktopApp:
         try:
             if msg == WM_TRAYICON:
                 self._handle_tray_message(lparam)
+                return 0
+
+            if msg == WM_SHOWME:
+                # 第二实例（快捷方式/exe）请求唤醒隐藏在托盘的窗口
+                self.log.info("收到唤醒请求，显示已有窗口")
+                self._show_window()
+                self.notify("程序已在运行，窗口已显示")
                 return 0
 
             if msg == win32con.WM_PAINT:

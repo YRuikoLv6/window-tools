@@ -15,7 +15,7 @@ import tempfile
 import win32con
 
 from window_tools import __version__
-from window_tools.core.desktop_app import DesktopApp
+from window_tools.core.desktop_app import DesktopApp, wake_existing_window
 from window_tools.core.tool_manager import ToolManager
 from window_tools.paths import CONFIG_PATH, ICON_PATH, LOG_DIR
 from window_tools.tools.mouse_lock import MouseLockTool
@@ -160,6 +160,17 @@ def selftest(log) -> int:
     force_exit_ok = probe._dialog is None and probe._force_exit is False
     checks.append(("托盘退出直通", force_exit_ok, "OK"))
 
+    # 单实例唤醒：类名固定且不随 PID 变化，唤醒消息不与托盘消息冲突
+    from window_tools.core import desktop_app as app_module
+    from window_tools.ui.tray import WM_TRAYICON
+    wake_protocol_ok = (
+        app_module.WINDOW_CLASS == "WindowToolsDesktop"
+        and "{" not in app_module.WINDOW_CLASS
+        and app_module.WM_SHOWME != WM_TRAYICON
+        and app_module.WINDOW_TITLE.endswith(f"v{__version__}")
+    )
+    checks.append(("单实例唤醒协议", wake_protocol_ok, app_module.WINDOW_CLASS))
+
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:
         log.info("%s %s - %s", "PASS" if passed else "FAIL", name, detail)
@@ -188,7 +199,11 @@ def main() -> int:
         return selftest(log)
 
     if not acquire_single_instance():
-        log.info("已有实例在运行，直接退出")
+        # 隐藏到托盘后再次启动：唤醒已有窗口，而不是静默退出
+        if wake_existing_window():
+            log.info("已有实例在运行，已通知其显示窗口")
+        else:
+            log.info("已有实例在运行，但未找到其窗口")
         return 0
 
     log.info("窗口工具集合 v%s 启动中", __version__)
