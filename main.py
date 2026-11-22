@@ -122,6 +122,31 @@ def selftest(log) -> int:
         struct.pack("<HHH", 0, 1, 7)
     checks.append(("应用图标资源", icon_ok, os.path.basename(ICON_PATH)))
 
+    # 关闭确认框：出现时屏蔽背景点击，消失后恢复普通热点
+    probe = DesktopApp.__new__(DesktopApp)
+    probe._dialog = {"hotspots": []}
+    probe._hotspots = [
+        {"kind": "action", "rect": (0, 0, 20, 20),
+         "tool": "t", "action": "a"},
+        {"kind": "dlg_hide", "rect": (30, 0, 20, 20)},
+    ]
+    dialog_hit = probe._hit_test(40, 10)
+    blocked_hit = probe._hit_test(10, 10)
+    probe._dialog = None
+    normal_hit = probe._hit_test(10, 10)
+    dialog_ok = (dialog_hit is not None and dialog_hit[0] == "dlg_hide"
+                 and blocked_hit is None and normal_hit is not None)
+    checks.append(("关闭确认模态命中", dialog_ok, "OK"))
+
+    # 托盘“退出程序”：带直通标志时关闭请求不弹确认框
+    probe.hwnd = 0
+    probe.log = log
+    probe._dialog = {"hotspots": []}
+    probe._force_exit = True
+    probe._wnd_proc(0, win32con.WM_CLOSE, 0, 0)
+    force_exit_ok = probe._dialog is None and probe._force_exit is False
+    checks.append(("托盘退出直通", force_exit_ok, "OK"))
+
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:
         log.info("%s %s - %s", "PASS" if passed else "FAIL", name, detail)

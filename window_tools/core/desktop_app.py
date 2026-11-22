@@ -107,6 +107,10 @@ class DesktopApp:
         self.tray: TrayIcon | None = None
         self.tray_menu: TrayMenu | None = None
 
+        # 关闭确认对话框（模态覆盖层）与托盘“退出程序”直通标志
+        self._dialog: dict | None = None
+        self._force_exit = False
+
     # -------------------------------------------------------- 对外接口 --
     def set_manager(self, manager) -> None:
         self.manager = manager
@@ -280,8 +284,35 @@ class DesktopApp:
         elif cmd == TRAY_HIDE:
             self._hide_window()
         elif cmd == TRAY_EXIT:
+            # 托盘菜单“退出程序”是明确指令，不再弹确认框
             if self.hwnd:
+                self._force_exit = True
                 win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
+
+    # ------------------------------------------------ 关闭确认对话框 ----
+    def _ask_close(self) -> None:
+        """收到关闭请求时弹出确认框，而不是直接销毁窗口。"""
+        if not self.hwnd or self._dialog:
+            return
+        self._dialog = {"hotspots": []}
+        self._show_window()
+        self._invalidate()
+        self.log.info("用户请求关闭窗口，等待选择隐藏到托盘或退出")
+
+    def _close_dialog(self) -> None:
+        if self._dialog is None:
+            return
+        self._dialog = None
+        self._hover = None
+        self._pressed = None
+        self._invalidate()
+
+    def _exit_app(self) -> None:
+        """真正退出：窗口销毁后由 WM_DESTROY 结束消息循环。"""
+        self._close_dialog()
+        if self.hwnd:
+            self.log.info("用户选择退出程序")
+            win32gui.DestroyWindow(self.hwnd)
 
     def _handle_tray_message(self, lparam) -> None:
         """处理托盘回调（双击显示/隐藏，右键弹出菜单）。"""
@@ -504,6 +535,67 @@ class DesktopApp:
         c.text("所有操作都在左侧工具卡片 · 全局热键见状态行 · 数据保存在 data 目录",
                PAD, footer_y, w - 2 * PAD, FOOTER_H, 11.5, C.TEXT_FAINT)
 
+        if self._dialog is not None:
+            self._draw_close_dialog(c, w, h)
+
+    def _draw_close_dialog(self, c, w: int, h: int) -> None:
+        """自绘模态确认框：隐藏到托盘 / 退出程序 / 取消。"""
+        # 半透明遮罩，背景仍可辨认但不可交互
+        c.rect(0, 0, w, h, gdi.argb(130, 14, 22, 40))
+
+        dw, dh = 470, 252
+        dx = max(12, (w - dw) // 2)
+        dy = max(12, (h - dh) // 2)
+        c.rounded(dx, dy + 6, dw, dh, 18, gdi.argb(48, 12, 22, 42))
+        c.rounded(dx, dy, dw, dh, 18, C.CARD, C.BORDER)
+
+        c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
+        c.text("?", dx + 24, dy + 23, 44, 46, 25, C.PRIMARY, True,
+               gdi.ALIGN_CENTER)
+        c.text("关闭窗口", dx + 80, dy + 22, dw - 104, 30, 18, C.TEXT, True)
+        c.text("隐藏到托盘后程序继续运行，可从任务栏图标唤出",
+               dx + 26, dy + 66, dw - 52, 24, 12.5, C.TEXT_SUB)
+        c.text("退出程序会关闭全部工具，并释放鼠标锁定",
+               dx + 26, dy + 92, dw - 52, 24, 12.5, C.TEXT_SUB)
+        c.rect(dx + 24, dy + 126, dw - 48, 1, C.DIVIDER)
+
+        gap = 12
+        bw = (dw - 48 - gap * 2) // 3
+        by = dy + 150
+        bh = 46
+        options = (
+            ("dlg_cancel", "取消", "default"),
+            ("dlg_hide", "隐藏到托盘", "primary"),
+            ("dlg_exit", "退出程序", "danger"),
+        )
+        for index, (kind, label, tone) in enumerate(options):
+            bx = dx + 24 + index * (bw + gap)
+            rect = (bx, by, bw, bh)
+            hovered = self._hover == kind
+            pressed = self._pressed == kind
+            if tone == "primary":
+                fill = C.PRIMARY_DARK if pressed else (
+                    C.PRIMARY if hovered else C.PRIMARY)
+                border = None
+                color = gdi.argb(255, 255, 255)
+                bold = True
+            elif tone == "danger":
+                fill = C.DANGER_SOFT if hovered else C.CARD
+                border = C.DANGER
+                color = C.DANGER
+                bold = True
+            else:
+                fill = C.PRIMARY_SOFT if hovered else C.CARD_SOFT
+                border = C.BORDER
+                color = C.TEXT_SUB
+                bold = False
+            offset = 1 if pressed else 0
+            c.rounded(bx + 1, by + 2, bw - 2, bh - 2, 9, C.SHADOW)
+            c.rounded(bx, by + offset, bw, bh - 2, 9, fill, border)
+            c.text(label, bx, by + offset, bw, bh - 2, 13, color, bold,
+                   gdi.ALIGN_CENTER)
+            self._hotspots.append({"kind": kind, "rect": rect})
+
     def _draw_tools(self, c, x: int, y: int, w: int, h: int) -> None:
         # 先测量总高度以支持滚动
         cards = []
@@ -688,13 +780,17 @@ class DesktopApp:
     # -------------------------------------------------------- 交互处理 --
     def _hit_test(self, x: int, y: int, buttons_only: bool = False):
         for spot in self._hotspots:
+            kind = spot["kind"]
+            is_dialog = kind.startswith("dlg_")
+            # 对话框出现时屏蔽背景交互，反之屏蔽对话框残留热点
+            if is_dialog != (self._dialog is not None):
+                continue
             rx, ry, rw, rh = spot["rect"]
             if rx <= x <= rx + rw and ry <= y <= ry + rh:
-                if spot["kind"] == "action":
-                    key = (spot["tool"], spot["action"])
-                    return ("action", key, spot)
+                if kind == "action":
+                    return ("action", (spot["tool"], spot["action"]), spot)
                 if not buttons_only:
-                    return (spot["kind"], spot["kind"], spot)
+                    return (kind, kind, spot)
         return None
 
     def _in_rect(self, x: int, y: int, which: str) -> bool:
@@ -844,7 +940,14 @@ class DesktopApp:
                 self._invalidate()
                 if hit and previous == hit[1]:
                     kind, key, spot = hit
-                    if kind == "action":
+                    if kind == "dlg_cancel":
+                        self._close_dialog()
+                    elif kind == "dlg_hide":
+                        self._close_dialog()
+                        self._hide_window()
+                    elif kind == "dlg_exit":
+                        self._exit_app()
+                    elif kind == "action":
                         threading.Thread(
                             target=self._run_action,
                             args=(spot["tool"], spot["action"]), daemon=True,
@@ -852,10 +955,12 @@ class DesktopApp:
                     elif kind == "min":
                         win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
                     elif kind == "close":
-                        win32gui.DestroyWindow(hwnd)
+                        self._ask_close()
                 return 0
 
             if msg == win32con.WM_MOUSEWHEEL:
+                if self._dialog is not None:
+                    return 0
                 delta = (int(wparam) >> 16) & 0xFFFF
                 if delta >= 0x8000:
                     delta -= 0x10000
@@ -896,8 +1001,17 @@ class DesktopApp:
                 self._invalidate()
                 return 0
 
+            if msg == win32con.WM_KEYDOWN and wparam == win32con.VK_ESCAPE:
+                if self._dialog is not None:
+                    self._close_dialog()
+                    return 0
+
             if msg == win32con.WM_CLOSE:
-                win32gui.DestroyWindow(hwnd)
+                if self._force_exit:
+                    self._force_exit = False
+                    self._exit_app()
+                else:
+                    self._ask_close()
                 return 0
 
             if msg == win32con.WM_DESTROY:
