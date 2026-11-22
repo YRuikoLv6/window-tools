@@ -75,12 +75,35 @@ def selftest(log) -> int:
     checks.append(("鼠标屏幕定位", monitor_index == 1,
                    f"index={monitor_index}"))
 
+    class _MouseLockAppStub:
+        def __init__(self, store):
+            self.log = log
+            self.config = store
+            self.notices = []
+
+        def notify(self, message, title=None):
+            self.notices.append(message)
+
     with tempfile.TemporaryDirectory() as folder:
         store = JsonStore(os.path.join(folder, "test.json"), {"a": 1, "b": {"c": 2}})
         store.data["b"]["c"] = 9
         ok = store.save()
         reloaded = JsonStore(store.path, {"a": 0, "b": {"c": 0}})
         checks.append(("配置持久化", ok and reloaded.get("b", {}).get("c") == 9, "OK"))
+
+        lock_store = JsonStore(
+            os.path.join(folder, "mouse.json"), {"mouse": {"enabled": True}}
+        )
+        lock_app = _MouseLockAppStub(lock_store)
+        lock_tool = MouseLockTool(lock_app)
+        lock_tool.on_display_change({})
+        auto_unlocked = (
+            not lock_tool.enabled
+            and lock_store.get("mouse", {}).get("enabled") is False
+            and bool(lock_app.notices)
+        )
+        checks.append(("显示器变化自动解锁", auto_unlocked, "OK"))
+        lock_tool.on_unload()
 
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:

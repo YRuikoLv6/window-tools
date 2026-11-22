@@ -106,13 +106,14 @@ class MouseLockTool(BaseTool):
         self._apply_clip(None)
 
     def on_display_change(self, signature: dict) -> None:
+        """显示器开关/增减后自动解锁，避免光标被锁在已失效的屏幕上。"""
         with self._guard:
-            if not self.enabled:
-                return
-            # 显示器布局变了，旧矩形失效，让维护线程按新布局重新定位
-            self._target_rect = None
-        self._wake.set()
-        self.log.info("显示器变化，鼠标锁定将重新适配")
+            was_enabled = self.enabled
+        if not was_enabled:
+            return
+        self.disable(notify=False)
+        self.app.notify("检测到显示器变化，已自动解锁鼠标", self.name)
+        self.log.info("显示器变化，鼠标已自动解锁")
 
     # ------------------------------------------------------------ 用户操作 --
     def toggle(self) -> None:

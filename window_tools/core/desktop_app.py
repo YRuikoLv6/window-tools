@@ -31,6 +31,7 @@ TIMER_REFRESH = 1
 TIMER_DISPLAY = 2
 REFRESH_MS = 800
 DISPLAY_DEBOUNCE_MS = 1500
+SC_MONITORPOWER = getattr(win32con, "SC_MONITORPOWER", 0xF170)
 
 TITLE_H = 64
 PAD = 22
@@ -69,6 +70,7 @@ class DesktopApp:
         self.scale = 1.0
         self.dpi_mode = ""
         self.last_display_change = 0.0
+        self._last_signature = None
         self.notices: deque = deque(maxlen=60)
 
         self._controls_ready = False
@@ -128,6 +130,13 @@ class DesktopApp:
 
     def note_display_change(self) -> None:
         self.last_display_change = time.time()
+
+    def _schedule_display_change(self, reason: str) -> None:
+        """统一去抖入口：WM_DISPLAYCHANGE、轮询和电源消息都走这里。"""
+        self.note_display_change()
+        if self.hwnd:
+            _set_timer(self.hwnd, TIMER_DISPLAY, DISPLAY_DEBOUNCE_MS)
+        self.log.info("检测到显示器变化（%s）", reason)
 
     def on_display_change(self) -> None:
         signature = winapi.screen_signature()
@@ -246,6 +255,11 @@ class DesktopApp:
     def _refresh(self, silent: bool = False) -> None:
         try:
             signature = winapi.screen_signature()
+            if self._last_signature is None:
+                self._last_signature = signature
+            elif signature != self._last_signature:
+                self._last_signature = signature
+                self._schedule_display_change("配置轮询")
             vx, vy, vw, vh = signature["virtual"]
             monitors = signature["monitors"]
             primary = monitors[0] if monitors else [0, 0, 0, 0]
@@ -780,10 +794,13 @@ class DesktopApp:
                 return 0
 
             if msg == win32con.WM_DISPLAYCHANGE:
-                self.note_display_change()
-                _set_timer(hwnd, TIMER_DISPLAY, DISPLAY_DEBOUNCE_MS)
-                self.log.info("检测到显示器变化")
+                self._schedule_display_change("系统消息")
                 return 0
+
+            if (msg == win32con.WM_SYSCOMMAND
+                    and (int(wparam) & 0xFFF0) == SC_MONITORPOWER):
+                self._schedule_display_change("显示器电源状态")
+                # 必须继续交给 DefWindowProc，否则会阻止系统关屏/唤醒
 
             if msg == win32con.WM_SIZE:
                 self._clamp_scroll()
