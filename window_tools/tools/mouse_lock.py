@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import threading
 from typing import Optional, Tuple
@@ -60,6 +61,8 @@ class MouseLockTool(BaseTool):
 
     # ------------------------------------------------------------ 生命周期 --
     def on_load(self) -> None:
+        # 进程正常退出路径（含未捕获异常）兜底释放裁剪区
+        atexit.register(self._emergency_release)
         ca = win32con.MOD_CONTROL | win32con.MOD_ALT
         cs = win32con.MOD_CONTROL | win32con.MOD_SHIFT
         cas = ca | win32con.MOD_SHIFT
@@ -98,12 +101,38 @@ class MouseLockTool(BaseTool):
         return ""
 
     def on_unload(self) -> None:
-        """退出时必须释放光标，且保留用户的启用状态供下次启动恢复。"""
+        """退出时释放光标，并写回关闭状态，避免下次启动又自动锁定。"""
         self._stop.set()
         self._wake.set()
         if self._thread:
             self._thread.join(timeout=2)
+        self._force_release()
+
+    def _force_release(self) -> None:
+        """释放裁剪区并把启用状态写回为关闭（幂等）。"""
+        with self._guard:
+            was_enabled = self.enabled
+            self.enabled = False
+            self._target_rect = None
         self._apply_clip(None)
+        self._clip_active = False
+        # 关键：退出即视为解锁，必须持久化，否则下次启动会自动重新锁定
+        if was_enabled or self.app.config.get("mouse", {}).get("enabled", False):
+            self.app.config.data.setdefault("mouse", {})["enabled"] = False
+            self.app.config.save()
+        self.log.info("程序退出，鼠标锁定已释放")
+
+    def _emergency_release(self) -> None:
+        """进程任意退出路径（含异常/强制关闭）的兜底释放。
+        atexit 不覆盖 os._exit 与进程被 kill，那两种情况由 Windows
+        在线程终止时自动释放 ClipCursor，不会把鼠标卡死。"""
+        try:
+            self._force_release()
+        except Exception:
+            try:
+                self._apply_clip(None)
+            except Exception:
+                pass
 
     def on_display_change(self, signature: dict) -> None:
         """显示器开关/增减后自动解锁，避免光标被锁在已失效的屏幕上。"""

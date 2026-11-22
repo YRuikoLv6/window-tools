@@ -105,6 +105,18 @@ def selftest(log) -> int:
         checks.append(("显示器变化自动解锁", auto_unlocked, "OK"))
         lock_tool.on_unload()
 
+        exit_store = JsonStore(
+            os.path.join(folder, "exit.json"), {"mouse": {"enabled": True}}
+        )
+        exit_app = _MouseLockAppStub(exit_store)
+        exit_tool = MouseLockTool(exit_app)
+        exit_tool.on_unload()
+        exit_unlocked = (
+            not exit_tool.enabled
+            and exit_store.get("mouse", {}).get("enabled") is False
+        )
+        checks.append(("退出自动解锁", exit_unlocked, "OK"))
+
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:
         log.info("%s %s - %s", "PASS" if passed else "FAIL", name, detail)
