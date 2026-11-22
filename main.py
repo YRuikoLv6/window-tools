@@ -17,6 +17,7 @@ from window_tools import __version__
 from window_tools.core.desktop_app import DesktopApp
 from window_tools.core.tool_manager import ToolManager
 from window_tools.paths import CONFIG_PATH, LOG_DIR
+from window_tools.tools.mouse_lock import MouseLockTool
 from window_tools.tools.window_layout import WindowLayoutTool
 from window_tools.utils import winapi
 from window_tools.utils.config import JsonStore
@@ -68,6 +69,12 @@ def selftest(log) -> int:
     checks.append(("边缘缩放命中", corner_hit == win32con.HTTOPLEFT,
                    f"HT={corner_hit}"))
 
+    monitors = [{"rect": (0, 0, 1920, 1080)},
+                {"rect": (1920, 0, 3840, 1080)}]
+    monitor_index, _ = MouseLockTool._locate_monitor(2000, 500, monitors)
+    checks.append(("鼠标屏幕定位", monitor_index == 1,
+                   f"index={monitor_index}"))
+
     with tempfile.TemporaryDirectory() as folder:
         store = JsonStore(os.path.join(folder, "test.json"), {"a": 1, "b": {"c": 2}})
         store.data["b"]["c"] = 9
@@ -95,6 +102,7 @@ def main() -> int:
     log = setup_logger(LOG_DIR)
     config = JsonStore(CONFIG_PATH, {
         "general": {"auto_detect": True},
+        "mouse": {"enabled": False},
     })
 
     if args.selftest:
@@ -108,6 +116,7 @@ def main() -> int:
     app = DesktopApp(log, config)
     manager = ToolManager(app)
     manager.register(WindowLayoutTool)
+    manager.register(MouseLockTool)
     app.set_manager(manager)
     app.run()
     return 0
