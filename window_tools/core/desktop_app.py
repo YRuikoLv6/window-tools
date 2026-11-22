@@ -41,7 +41,7 @@ BTN_GAP_X = 12
 BTN_GAP_Y = 12
 LIST_ROW_NOTICE = 32
 LIST_ROW_WINDOW = 30
-FOOTER_H = 32
+FOOTER_H = 28
 
 _user32 = ctypes.windll.user32
 _user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
@@ -274,9 +274,13 @@ class DesktopApp:
                 off = winapi.visible_ratio(rect, virtual) < 0.35
                 prefix = "[越界] " if off else ""
                 title = window["title"].replace("\n", " ")
-                lines.append(
-                    f"{prefix}{title}  —  {window['process']}  {rect}"
-                )
+                left, top, right, bottom = rect
+                size = f"{right - left}×{bottom - top}"
+                head = f"{prefix}{title}"
+                process = window["process"]
+                if process:
+                    head += f"  —  {process}"
+                lines.append(f"{head}  ·  {left},{top}  {size}")
             self._window_lines = lines
 
             if self.manager:
@@ -398,8 +402,7 @@ class DesktopApp:
         self._draw_lists(c, right_x, body_y, right_w, body_h)
 
         footer_y = h - FOOTER_H - 4
-        c.text("切换显示器模式后自动还原 · Ctrl+Alt+S 保存 · Ctrl+Alt+R 还原 · "
-               "Ctrl+Alt+M 救援（占用时自动降级）· 数据保存在 data 目录",
+        c.text("所有操作都在左侧工具卡片 · 全局热键见状态行 · 数据保存在 data 目录",
                PAD, footer_y, w - 2 * PAD, FOOTER_H, 11.5, C.TEXT_FAINT)
 
     def _draw_tools(self, c, x: int, y: int, w: int, h: int) -> None:
@@ -410,41 +413,53 @@ class DesktopApp:
             per_row = max(1, (w - 36 + BTN_GAP_X) // 170)
             buttons = block["buttons"]
             rows = max(1, (len(buttons) + per_row - 1) // per_row)
-            card_h = 20 + 32 + 30 + rows * BTN_H + (rows - 1) * BTN_GAP_Y + 18
+            card_h = 16 + 28 + 26 + rows * BTN_H + \
+                (rows - 1) * BTN_GAP_Y + 14
             cards.append((block, cur_y, card_h, per_row))
             cur_y += card_h + 16
-        guide_h = 148
+        guide_h = 126
         total_h = max(0, cur_y - y - 16) + guide_h + 16
         max_scroll = max(0, total_h - h)
         self._left_scroll = min(self._left_scroll, max_scroll)
 
+        palette = [C.PRIMARY, C.WARNING, C.SUCCESS]
         c.clip(x, y, w, h)
         try:
-            for block, card_y, card_h, per_row in cards:
+            for index, (block, card_y, card_h, per_row) in enumerate(cards):
                 top = card_y - self._left_scroll
                 if top + card_h < y or top > y + h:
                     continue
+                accent = palette[index % len(palette)]
                 c.rounded(x, top + 3, w, card_h, CARD_RADIUS, C.SHADOW)
                 c.rounded(x, top, w, card_h, CARD_RADIUS, C.CARD, C.BORDER)
-                c.text(block["name"], x + 18, top + 14, w - 120, 30, 15,
+
+                # 工具图标提升可辨识度，颜色随工具轮换
+                c.rounded(x + 18, top + 14, 30, 30, 9, accent)
+                glyph = block["name"][:1] or "工"
+                c.text(glyph, x + 18, top + 14, 30, 30, 14,
+                       gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
+                c.text(block["name"], x + 58, top + 12, w - 160, 28, 15,
                        C.TEXT, True)
                 badge_w = 64
-                c.rounded(x + w - badge_w - 18, top + 18, badge_w, 24, 12,
+                c.rounded(x + w - badge_w - 18, top + 14, badge_w, 24, 12,
                           C.PRIMARY_SOFT)
                 c.text("v" + block["version"], x + w - badge_w - 18,
-                       top + 18, badge_w, 24, 10.5, C.PRIMARY, False,
+                       top + 14, badge_w, 24, 10.5, C.PRIMARY, False,
                        gdi.ALIGN_CENTER)
-                dot_color = C.SUCCESS if "开" in block["status"] or \
-                    "已保存" in block["status"] else C.PRIMARY
-                c.ellipse(x + 20, top + 58, 8, 8, dot_color)
-                c.text(block["status"], x + 36, top + 52, w - 54, 26, 12,
+
+                status = block["status"]
+                active = ("开" in status or "已锁定" in status
+                          or "已保存" in status)
+                c.ellipse(x + 20, top + 50, 8, 8,
+                          C.SUCCESS if active else accent)
+                c.text(status, x + 36, top + 44, w - 54, 26, 12,
                        C.TEXT_SUB)
 
                 btn_w = (w - 36 - (per_row - 1) * BTN_GAP_X) // per_row
-                for index, button in enumerate(block["buttons"]):
-                    row, col = divmod(index, per_row)
+                for btn_index, button in enumerate(block["buttons"]):
+                    row, col = divmod(btn_index, per_row)
                     bx = x + 18 + col * (btn_w + BTN_GAP_X)
-                    by = top + 86 + row * (BTN_H + BTN_GAP_Y)
+                    by = top + 78 + row * (BTN_H + BTN_GAP_Y)
                     rect = (bx, by, btn_w, BTN_H)
                     self._draw_button(c, button, rect)
                     self._hotspots.append({
@@ -458,18 +473,20 @@ class DesktopApp:
                 c.rounded(x, guide_top + 3, w, guide_h, CARD_RADIUS, C.SHADOW)
                 c.rounded(x, guide_top, w, guide_h, CARD_RADIUS,
                           C.CARD_SOFT, C.BORDER)
-                c.text("快速上手", x + 18, guide_top + 12, w - 36, 28,
+                c.text("快速上手", x + 18, guide_top + 10, w - 36, 26,
                        15, C.TEXT, True)
+                c.rect(x + 18, guide_top + 38, w - 36, 1, C.DIVIDER)
                 steps = [
                     "1  先点「保存当前布局」，记录窗口位置与大小",
                     "2  切换显示器模式（如 4K ↔ 1K），布局自动按比例还原",
-                    "3  窗口跑出屏幕时点「救援越界窗口」，或按全局热键",
+                    "3  窗口越界可救援，鼠标可用锁定工具固定在当前屏幕",
                 ]
-                for index, step in enumerate(steps):
-                    c.ellipse(x + 20, guide_top + 55 + index * 30, 8, 8,
-                              C.PRIMARY if index == 0 else C.TEXT_FAINT)
-                    c.text(step, x + 38, guide_top + 48 + index * 30,
-                           w - 56, 26, 12.5, C.TEXT_SUB)
+                for step_index, step in enumerate(steps):
+                    offset = guide_top + 42 + step_index * 25
+                    c.ellipse(x + 20, offset + 6, 8, 8,
+                              C.PRIMARY if step_index == 0 else C.TEXT_FAINT)
+                    c.text(step, x + 38, offset, w - 56, 24, 12.5,
+                           C.TEXT_SUB)
         finally:
             c.reset_clip()
 
@@ -519,7 +536,7 @@ class DesktopApp:
 
     def _draw_lists(self, c, x: int, y: int, w: int, h: int) -> None:
         gap = 16
-        notice_h = max(160, int((h - gap) * 0.44))
+        notice_h = max(140, int((h - gap) * 0.32))
         window_h = max(160, h - gap - notice_h)
         self._draw_list_card(c, x, y, w, notice_h, "最近通知",
                              self._notice_lines, LIST_ROW_NOTICE,
@@ -530,9 +547,11 @@ class DesktopApp:
 
     def _draw_list_card(self, c, x, y, w, h, title, lines, row_h,
                         scroll, which) -> None:
+        accent = C.PRIMARY if which == "notice" else C.SUCCESS
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
         c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
-        c.text(title, x + 18, y + 10, w - 36, 28, 14.5, C.TEXT, True)
+        c.rounded(x + 18, y + 13, 3, 20, 1, accent)
+        c.text(title, x + 30, y + 10, w - 48, 28, 14.5, C.TEXT, True)
         c.rect(x + 18, y + 40, w - 36, 1, C.DIVIDER)
         list_y = y + 48
         list_h = h - 56

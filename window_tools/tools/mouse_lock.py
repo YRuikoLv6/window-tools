@@ -252,7 +252,7 @@ class MouseLockTool(BaseTool):
             enabled = self.enabled
             index = self._monitor_index
         state = "已锁定" if enabled else "未锁定"
-        target = f"屏幕 {index + 1}" if index >= 0 else "屏幕 -"
+        target = f"屏幕 {index + 1}" if index >= 0 else "-"
         switch = self._toggle_hotkey_label or "未注册"
         unlock = self._unlock_hotkey_label or switch
         return f"鼠标 {state} · 目标 {target} · 切换 {switch} / 解锁 {unlock}"
