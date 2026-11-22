@@ -614,14 +614,61 @@ class DesktopApp:
             self._left_scroll = max(0, self._left_scroll - delta)
         self._invalidate()
 
+    @staticmethod
+    def _screen_pos(lparam) -> tuple[int, int]:
+        """解析 WM_NCHITTEST / WM_MOUSEWHEEL 的屏幕坐标（支持负数）。"""
+        x = lparam & 0xFFFF
+        y = (lparam >> 16) & 0xFFFF
+        if x & 0x8000:
+            x -= 0x10000
+        if y & 0x8000:
+            y -= 0x10000
+        return x, y
+
+    @staticmethod
+    def _nonclient_hit(px: int, py: int, width: int, height: int,
+                       edge: int = 8) -> int:
+        """只有四边用于系统缩放，其余区域必须返回 HTCLIENT。
+
+        早期版本把整个客户区返回 HTCAPTION 以支持拖拽，结果是 Windows 把
+        左键消息改派为 WM_NCLBUTTONDOWN/UP，自绘按钮永远收不到点击。
+        """
+        left = px < edge
+        right = px > width - edge
+        top = py < edge
+        bottom = py > height - edge
+        if left and top:
+            return win32con.HTTOPLEFT
+        if right and top:
+            return win32con.HTTOPRIGHT
+        if left and bottom:
+            return win32con.HTBOTTOMLEFT
+        if right and bottom:
+            return win32con.HTBOTTOMRIGHT
+        if left:
+            return win32con.HTLEFT
+        if right:
+            return win32con.HTRIGHT
+        if top:
+            return win32con.HTTOP
+        if bottom:
+            return win32con.HTBOTTOM
+        return win32con.HTCLIENT
+
+    @staticmethod
+    def _start_title_drag(hwnd: int) -> None:
+        """标题栏空白区拖拽：显式交给系统处理，不影响客户区按钮点击。"""
+        try:
+            win32gui.ReleaseCapture()
+            win32gui.SendMessage(hwnd, win32con.WM_NCLBUTTONDOWN,
+                                 win32con.HTCAPTION, 0)
+        except Exception:
+            pass
+
     def _logical_pos(self, lparam) -> tuple[int, int]:
         """把鼠标消息中的物理像素坐标换算为布局使用的逻辑坐标。"""
-        x = (lparam & 0xFFFF) / self.scale
-        y = ((lparam >> 16) & 0xFFFF) / self.scale
-        # 处理负数坐标（高 16 位有符号）
-        if (lparam >> 16) & 0x8000:
-            y = (((lparam >> 16) & 0xFFFF) - 0x10000) / self.scale
-        return int(x), int(y)
+        x, y = self._screen_pos(lparam)
+        return int(x / self.scale), int(y / self.scale)
 
     # -------------------------------------------------------- 消息处理 --
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
@@ -634,32 +681,11 @@ class DesktopApp:
                 return 1
 
             if msg == win32con.WM_NCHITTEST:
-                px, py = win32gui.ScreenToClient(hwnd, (
-                    lparam & 0xFFFF, (lparam >> 16) & 0xFFFF))
+                sx, sy = self._screen_pos(lparam)
+                px, py = win32gui.ScreenToClient(hwnd, (sx, sy))
                 rect = win32gui.GetClientRect(hwnd)
-                w, h = rect[2], rect[3]
-                edge = 8
-                left = px < edge
-                right = px > w - edge
-                top = py < edge
-                bottom = py > h - edge
-                if left and top:
-                    return win32con.HTTOPLEFT
-                if right and top:
-                    return win32con.HTTOPRIGHT
-                if left and bottom:
-                    return win32con.HTBOTTOMLEFT
-                if right and bottom:
-                    return win32con.HTBOTTOMRIGHT
-                if left:
-                    return win32con.HTLEFT
-                if right:
-                    return win32con.HTRIGHT
-                if top:
-                    return win32con.HTTOP
-                if bottom:
-                    return win32con.HTBOTTOM
-                return win32con.HTCAPTION
+                edge = max(6, int(8 * self.scale))
+                return self._nonclient_hit(px, py, rect[2], rect[3], edge)
 
             if msg == win32con.WM_SETCURSOR:
                 cursor = win32con.IDC_HAND if self._hover else \
@@ -682,6 +708,10 @@ class DesktopApp:
                 if hit:
                     self._pressed = hit[1]
                     self._invalidate()
+                    return 0
+                # 标题栏空白处拖动窗口；按钮区域不交给系统，确保点击能触发
+                if 0 <= y < TITLE_H:
+                    self._start_title_drag(hwnd)
                 return 0
 
             if msg == win32con.WM_LBUTTONUP:
@@ -707,10 +737,7 @@ class DesktopApp:
                 delta = (int(wparam) >> 16) & 0xFFFF
                 if delta >= 0x8000:
                     delta -= 0x10000
-                sx = lparam & 0xFFFF
-                sy = (lparam >> 16) & 0xFFFF
-                if (lparam >> 16) & 0x8000:
-                    sy -= 0x10000
+                sx, sy = self._screen_pos(lparam)
                 cx, cy = win32gui.ScreenToClient(hwnd, (sx, sy))
                 x, y = int(cx / self.scale), int(cy / self.scale)
                 self._apply_scroll(x, y, 1 if delta > 0 else -1)

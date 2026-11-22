@@ -11,6 +11,8 @@ import os
 import sys
 import tempfile
 
+import win32con
+
 from window_tools import __version__
 from window_tools.core.desktop_app import DesktopApp
 from window_tools.core.tool_manager import ToolManager
@@ -58,6 +60,13 @@ def selftest(log) -> int:
 
     ratio = winapi.visible_ratio((-500, 0, -100, 400), (0, 0, 1920, 1080))
     checks.append(("可见面积计算", ratio == 0.0, f"{ratio:.2f}"))
+
+    client_hit = DesktopApp._nonclient_hit(400, 180, 800, 600)
+    checks.append(("客户区鼠标命中", client_hit == win32con.HTCLIENT,
+                   f"HT={client_hit}"))
+    corner_hit = DesktopApp._nonclient_hit(2, 2, 800, 600)
+    checks.append(("边缘缩放命中", corner_hit == win32con.HTTOPLEFT,
+                   f"HT={corner_hit}"))
 
     with tempfile.TemporaryDirectory() as folder:
         store = JsonStore(os.path.join(folder, "test.json"), {"a": 1, "b": {"c": 2}})
