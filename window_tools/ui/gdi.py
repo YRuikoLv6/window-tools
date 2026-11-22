@@ -169,6 +169,18 @@ ALIGN_RIGHT = 2
 VALIGN_TOP = 0
 VALIGN_MIDDLE = 1
 
+# 全局 UI 缩放（按主屏 DPI 设置，逻辑坐标统一乘此值绘制）
+UI_SCALE = 1.0
+
+
+def set_scale(scale: float) -> None:
+    global UI_SCALE
+    UI_SCALE = max(0.8, min(2.5, float(scale)))
+
+
+def get_scale() -> float:
+    return UI_SCALE
+
 
 def _font(size: float, bold: bool) -> int:
     key = (round(size, 1), bool(bold))
@@ -200,11 +212,14 @@ def _string_format(align: int, valign: int, ellipsis: bool) -> int:
 
 
 class Canvas:
-    """绑定一个 HDC 的绘制上下文；用 with 语句自动释放。"""
+    """绑定一个 HDC 的绘制上下文；逻辑坐标自动按 UI_SCALE 放大到物理像素。"""
 
-    def __init__(self, hdc: int, width: int, height: int):
-        self.width = max(1, int(width))
-        self.height = max(1, int(height))
+    def __init__(self, hdc: int, width: int, height: int,
+                 scale: float | None = None):
+        self.scale = float(scale if scale is not None else UI_SCALE)
+        # width/height 为逻辑尺寸，物理尺寸需乘缩放
+        self.width = max(1, int(width * self.scale))
+        self.height = max(1, int(height * self.scale))
         self.graphics = P()
         self._brushes: list[int] = []
         self.ok = _create_graphics(hdc, ctypes.byref(self.graphics)) == 0
@@ -226,6 +241,9 @@ class Canvas:
             _delete_graphics(self.graphics)
             self.graphics = P()
 
+    def _s(self, value) -> float:
+        return float(value) * self.scale
+
     def _brush(self, color: int) -> int:
         brush = P()
         if _create_solid(color, ctypes.byref(brush)) != 0:
@@ -241,13 +259,14 @@ class Canvas:
         if w <= 0 or h <= 0:
             return
         brush = self._brush(color)
-        _fill_rect(self.graphics, P(brush), float(x), float(y),
-                   float(w), float(h))
+        _fill_rect(self.graphics, P(brush), self._s(x), self._s(y),
+                   self._s(w), self._s(h))
 
     def border(self, x, y, w, h, color: int, width: float = 1.0) -> None:
         pen = P()
-        if _create_pen(color, float(width), 0, ctypes.byref(pen)) == 0:
-            _draw_rect(self.graphics, pen, float(x), float(y), float(w), float(h))
+        if _create_pen(color, self._s(width), 0, ctypes.byref(pen)) == 0:
+            _draw_rect(self.graphics, pen, self._s(x), self._s(y),
+                       self._s(w), self._s(h))
             _delete_pen(pen)
 
     def rounded(self, x, y, w, h, radius: float, fill: int,
@@ -255,7 +274,8 @@ class Canvas:
                 gradient: int | None = None) -> None:
         if w <= 0 or h <= 0:
             return
-        radius = max(0.0, min(float(radius), min(w, h) / 2.0))
+        x, y, w, h = self._s(x), self._s(y), self._s(w), self._s(h)
+        radius = max(0.0, min(self._s(radius), min(w, h) / 2.0))
         path = P()
         if _create_path(0, ctypes.byref(path)) != 0:
             return
@@ -278,45 +298,48 @@ class Canvas:
         _delete_brush(brush)
         if border is not None:
             pen = P()
-            if _create_pen(border, float(border_width), 0,
+            if _create_pen(border, self._s(border_width), 0,
                            ctypes.byref(pen)) == 0:
                 _draw_path(self.graphics, pen, path)
                 _delete_pen(pen)
         _delete_path(path)
 
     def clip(self, x, y, w, h) -> None:
-        _set_clip(self.graphics, float(x), float(y), float(w), float(h), 0)
+        _set_clip(self.graphics, self._s(x), self._s(y),
+                  self._s(w), self._s(h), 0)
 
     def reset_clip(self) -> None:
         _reset_clip(self.graphics)
 
     def ellipse(self, x, y, w, h, color: int) -> None:
-        _fill_ellipse(self.graphics, P(self._brush(color)), float(x), float(y),
-                      float(w), float(h))
+        _fill_ellipse(self.graphics, P(self._brush(color)), self._s(x),
+                      self._s(y), self._s(w), self._s(h))
 
     def text(self, value, x, y, w, h, size: float = 11, color: int = C.TEXT,
              bold: bool = False, align: int = ALIGN_LEFT,
              valign: int = VALIGN_MIDDLE, ellipsis: bool = True) -> None:
         if w <= 0 or h <= 0:
             return
-        font = _font(size, bold)
+        font = _font(size * self.scale, bold)
         if not font:
             return
         sf = _string_format(align, valign, ellipsis)
-        rect = RectF(float(x), float(y), float(w), float(h))
+        rect = RectF(self._s(x), self._s(y), self._s(w), self._s(h))
         _draw_string(self.graphics, str(value), -1, P(font),
                      ctypes.byref(rect), P(sf) if sf else None,
                      P(self._brush(color)))
 
     def measure(self, value, size: float = 11, bold: bool = False) -> float:
-        font = _font(size, bold)
+        font = _font(size * self.scale, bold)
         if not font:
             return 0.0
         rect = RectF(0, 0, 10000, 1000)
         used = RectF()
+        fitted = ctypes.c_int(0)
         _measure_string(self.graphics, str(value), -1, P(font),
-                        ctypes.byref(rect), None, ctypes.byref(used), None)
-        return float(used.Width)
+                        ctypes.byref(rect), None, ctypes.byref(used),
+                        ctypes.byref(fitted))
+        return float(used.Width) / self.scale
 
 
 def _solid(color: int) -> int:

@@ -135,11 +135,8 @@ class WindowLayoutTool(BaseTool):
             count = len(self.history)
         has_profile = bool(self.store.get("profile"))
         return (
-            f"快照 {count} 条 | 手动布局 {'已保存' if has_profile else '未保存'}"
-            f" | 自动检测 {'开' if self.auto_enabled else '关'}"
-            f" | 键位 保存:{self._save_hotkey_label or '无'}"
-            f" 还原:{self._restore_hotkey_label or '无'}"
-            f" 救援:{self._rescue_hotkey_label or '无'}"
+            f"快照 {count} 条 · 布局 {'已保存' if has_profile else '未保存'}"
+            f" · 自动检测 {'开' if self.auto_enabled else '关'}"
         )
 
     # ------------------------------------------------------------ 用户操作 --

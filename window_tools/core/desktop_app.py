@@ -32,16 +32,16 @@ TIMER_DISPLAY = 2
 REFRESH_MS = 800
 DISPLAY_DEBOUNCE_MS = 1500
 
-TITLE_H = 58
-PAD = 20
-INFO_H = 88
-CARD_RADIUS = 12
-BTN_H = 38
-BTN_GAP_X = 10
-BTN_GAP_Y = 10
-LIST_ROW_NOTICE = 26
-LIST_ROW_WINDOW = 24
-FOOTER_H = 28
+TITLE_H = 64
+PAD = 22
+INFO_H = 100
+CARD_RADIUS = 14
+BTN_H = 46
+BTN_GAP_X = 12
+BTN_GAP_Y = 12
+LIST_ROW_NOTICE = 32
+LIST_ROW_WINDOW = 30
+FOOTER_H = 32
 
 _user32 = ctypes.windll.user32
 _user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
@@ -66,6 +66,7 @@ class DesktopApp:
         self.title = title
         self.manager = None
         self.hwnd = 0
+        self.scale = 1.0
         self.dpi_mode = ""
         self.last_display_change = 0.0
         self.notices: deque = deque(maxlen=60)
@@ -141,6 +142,18 @@ class DesktopApp:
         if not gdi.startup():
             self.log.warning("GDI+ 启动失败，界面可能显示异常")
 
+        # 按主屏 DPI 缩放整个界面：逻辑坐标统一，绘制时放大到物理像素
+        try:
+            screen_hdc = win32gui.GetDC(0)
+            dpi_x = ctypes.windll.gdi32.GetDeviceCaps(screen_hdc, 88)
+            win32gui.ReleaseDC(0, screen_hdc)
+            scale = max(1.0, min(2.0, dpi_x / 96.0))
+        except Exception:
+            scale = 1.0
+        gdi.set_scale(scale)
+        self.scale = scale
+        self.log.info("UI 缩放: %.2f (DPI=%s)", scale, dpi_x)
+
         class_name = f"WindowToolsDesktop_{os.getpid()}"
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = self._wnd_proc
@@ -157,9 +170,11 @@ class DesktopApp:
         except win32gui.error:
             pass
 
-        width, height = 1120, 760
+        # 逻辑尺寸 1120×760，物理尺寸按 DPI 放大，且不超过屏幕
         screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
         screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+        width = int(min(1120 * scale, screen_w - 40))
+        height = int(min(760 * scale, screen_h - 40))
         left = max(0, (screen_w - width) // 2)
         top = max(0, (screen_h - height) // 2)
 
@@ -301,15 +316,19 @@ class DesktopApp:
             return
         try:
             rect = win32gui.GetClientRect(hwnd)
-            width = max(1, rect[2] - rect[0])
-            height = max(1, rect[3] - rect[1])
+            phys_w = max(1, rect[2] - rect[0])
+            phys_h = max(1, rect[3] - rect[1])
+            # Canvas 内部按 scale 放大；这里传逻辑尺寸给布局
+            logical_w = max(1, int(phys_w / self.scale))
+            logical_h = max(1, int(phys_h / self.scale))
             memdc = win32gui.CreateCompatibleDC(hdc)
-            bitmap = win32gui.CreateCompatibleBitmap(hdc, width, height)
+            bitmap = win32gui.CreateCompatibleBitmap(hdc, phys_w, phys_h)
             old = win32gui.SelectObject(memdc, bitmap)
             try:
-                with gdi.Canvas(memdc, width, height) as canvas:
-                    self._draw(canvas, width, height)
-                win32gui.BitBlt(hdc, 0, 0, width, height, memdc, 0, 0,
+                with gdi.Canvas(memdc, logical_w, logical_h,
+                                self.scale) as canvas:
+                    self._draw(canvas, logical_w, logical_h)
+                win32gui.BitBlt(hdc, 0, 0, phys_w, phys_h, memdc, 0, 0,
                                 win32con.SRCCOPY)
             finally:
                 win32gui.SelectObject(memdc, old)
@@ -330,16 +349,16 @@ class DesktopApp:
 
         # 标题栏
         c.rounded(0, 0, w, TITLE_H, 1, C.HEADER_A, gradient=C.HEADER_B)
-        c.rounded(18, 14, 30, 30, 8, gdi.argb(255, 255, 255, 42))
-        c.text("窗", 18, 14, 30, 30, 14, gdi.argb(255, 255, 255), True,
+        c.rounded(18, 16, 34, 34, 9, gdi.argb(255, 255, 255, 42))
+        c.text("窗", 18, 16, 34, 34, 17, gdi.argb(255, 255, 255), True,
                gdi.ALIGN_CENTER)
-        c.text("窗口工具集合", 58, 9, 220, 25, 15,
+        c.text("窗口工具集合", 62, 10, 240, 28, 19,
                gdi.argb(255, 255, 255), True)
-        c.text("多显示器窗口布局守护 · 自绘界面", 58, 32, 260, 18, 9.5,
-               gdi.argb(255, 255, 255, 185))
+        c.text("多显示器窗口布局守护 · 自绘界面", 62, 37, 280, 20, 11.5,
+               gdi.argb(255, 255, 255, 195))
 
-        min_rect = (w - 78, 14, 30, 30)
-        close_rect = (w - 42, 14, 30, 30)
+        min_rect = (w - 82, 17, 32, 32)
+        close_rect = (w - 44, 17, 32, 32)
         for kind, rect, glyph in (("min", min_rect, "–"),
                                   ("close", close_rect, "×")):
             hovered = self._hover == kind
@@ -350,7 +369,7 @@ class DesktopApp:
                 c.rounded(rect[0], rect[1], rect[2], rect[3], 7, fill)
             color = gdi.argb(255, 255, 255) if kind != "close" or not hovered \
                 else gdi.argb(255, 255, 225, 225)
-            c.text(glyph, rect[0], rect[1] - 1, rect[2], rect[3] + 2, 15,
+            c.text(glyph, rect[0], rect[1] - 1, rect[2], rect[3] + 2, 18,
                    color, False, gdi.ALIGN_CENTER)
             self._hotspots.append({"kind": kind, "rect": rect})
 
@@ -361,41 +380,41 @@ class DesktopApp:
         c.rounded(PAD, info_y, card_w, INFO_H, CARD_RADIUS, C.CARD, C.BORDER)
         cell_w = (card_w - 32) // max(1, len(self._metrics))
         for index, (label, value, accent) in enumerate(self._metrics):
-            x = PAD + 16 + index * cell_w
-            c.rounded(x, info_y + 22, 3, 44, 1, accent)
-            c.text(label, x + 12, info_y + 16, cell_w - 20, 20, 9.5,
+            x = PAD + 18 + index * cell_w
+            c.rounded(x, info_y + 24, 4, 52, 2, accent)
+            c.text(label, x + 14, info_y + 16, cell_w - 22, 24, 11.5,
                    C.TEXT_SUB)
-            c.text(value, x + 12, info_y + 38, cell_w - 20, 28, 13,
+            c.text(value, x + 14, info_y + 42, cell_w - 22, 32, 17,
                    C.TEXT, True)
 
-        body_y = info_y + INFO_H + 14
+        body_y = info_y + INFO_H + 16
         body_h = max(120, h - body_y - FOOTER_H - 16)
-        left_w = max(360, int((w - 2 * PAD - 16) * 0.58))
-        right_x = PAD + left_w + 16
-        right_w = max(260, w - PAD - right_x)
+        left_w = max(380, int((w - 2 * PAD - 18) * 0.58))
+        right_x = PAD + left_w + 18
+        right_w = max(280, w - PAD - right_x)
 
         self._list_rects["tools"] = (PAD, body_y, left_w, body_h)
         self._draw_tools(c, PAD, body_y, left_w, body_h)
         self._draw_lists(c, right_x, body_y, right_w, body_h)
 
-        footer_y = h - FOOTER_H - 6
+        footer_y = h - FOOTER_H - 4
         c.text("切换显示器模式后自动还原 · Ctrl+Alt+S 保存 · Ctrl+Alt+R 还原 · "
                "Ctrl+Alt+M 救援（占用时自动降级）· 数据保存在 data 目录",
-               PAD, footer_y, w - 2 * PAD, FOOTER_H, 9.5, C.TEXT_FAINT)
+               PAD, footer_y, w - 2 * PAD, FOOTER_H, 11.5, C.TEXT_FAINT)
 
     def _draw_tools(self, c, x: int, y: int, w: int, h: int) -> None:
         # 先测量总高度以支持滚动
         cards = []
         cur_y = y
         for block in self._tool_blocks:
-            per_row = max(1, (w - 32 + BTN_GAP_X) // 168)
+            per_row = max(1, (w - 36 + BTN_GAP_X) // 170)
             buttons = block["buttons"]
             rows = max(1, (len(buttons) + per_row - 1) // per_row)
-            card_h = 18 + 28 + 26 + rows * BTN_H + (rows - 1) * BTN_GAP_Y + 16
+            card_h = 20 + 32 + 30 + rows * BTN_H + (rows - 1) * BTN_GAP_Y + 18
             cards.append((block, cur_y, card_h, per_row))
-            cur_y += card_h + 14
-        guide_h = 118
-        total_h = max(0, cur_y - y - 14) + guide_h + 14
+            cur_y += card_h + 16
+        guide_h = 148
+        total_h = max(0, cur_y - y - 16) + guide_h + 16
         max_scroll = max(0, total_h - h)
         self._left_scroll = min(self._left_scroll, max_scroll)
 
@@ -407,25 +426,25 @@ class DesktopApp:
                     continue
                 c.rounded(x, top + 3, w, card_h, CARD_RADIUS, C.SHADOW)
                 c.rounded(x, top, w, card_h, CARD_RADIUS, C.CARD, C.BORDER)
-                c.text(block["name"], x + 16, top + 12, w - 108, 26, 12.5,
+                c.text(block["name"], x + 18, top + 14, w - 120, 30, 15,
                        C.TEXT, True)
-                badge_w = 58
-                c.rounded(x + w - badge_w - 16, top + 15, badge_w, 20, 10,
+                badge_w = 64
+                c.rounded(x + w - badge_w - 18, top + 18, badge_w, 24, 12,
                           C.PRIMARY_SOFT)
-                c.text("v" + block["version"], x + w - badge_w - 16,
-                       top + 15, badge_w, 20, 9, C.PRIMARY, False,
+                c.text("v" + block["version"], x + w - badge_w - 18,
+                       top + 18, badge_w, 24, 10.5, C.PRIMARY, False,
                        gdi.ALIGN_CENTER)
                 dot_color = C.SUCCESS if "开" in block["status"] or \
                     "已保存" in block["status"] else C.PRIMARY
-                c.ellipse(x + 18, top + 49, 7, 7, dot_color)
-                c.text(block["status"], x + 32, top + 43, w - 48, 22, 10,
+                c.ellipse(x + 20, top + 58, 8, 8, dot_color)
+                c.text(block["status"], x + 36, top + 52, w - 54, 26, 12,
                        C.TEXT_SUB)
 
-                btn_w = (w - 32 - (per_row - 1) * BTN_GAP_X) // per_row
+                btn_w = (w - 36 - (per_row - 1) * BTN_GAP_X) // per_row
                 for index, button in enumerate(block["buttons"]):
                     row, col = divmod(index, per_row)
-                    bx = x + 16 + col * (btn_w + BTN_GAP_X)
-                    by = top + 73 + row * (BTN_H + BTN_GAP_Y)
+                    bx = x + 18 + col * (btn_w + BTN_GAP_X)
+                    by = top + 86 + row * (BTN_H + BTN_GAP_Y)
                     rect = (bx, by, btn_w, BTN_H)
                     self._draw_button(c, button, rect)
                     self._hotspots.append({
@@ -439,18 +458,18 @@ class DesktopApp:
                 c.rounded(x, guide_top + 3, w, guide_h, CARD_RADIUS, C.SHADOW)
                 c.rounded(x, guide_top, w, guide_h, CARD_RADIUS,
                           C.CARD_SOFT, C.BORDER)
-                c.text("快速上手", x + 16, guide_top + 10, w - 32, 24,
-                       12, C.TEXT, True)
+                c.text("快速上手", x + 18, guide_top + 12, w - 36, 28,
+                       15, C.TEXT, True)
                 steps = [
                     "1  先点「保存当前布局」，记录窗口位置与大小",
                     "2  切换显示器模式（如 4K ↔ 1K），布局自动按比例还原",
                     "3  窗口跑出屏幕时点「救援越界窗口」，或按全局热键",
                 ]
                 for index, step in enumerate(steps):
-                    c.ellipse(x + 18, guide_top + 45 + index * 23, 6, 6,
+                    c.ellipse(x + 20, guide_top + 55 + index * 30, 8, 8,
                               C.PRIMARY if index == 0 else C.TEXT_FAINT)
-                    c.text(step, x + 32, guide_top + 39 + index * 23,
-                           w - 48, 20, 10, C.TEXT_SUB)
+                    c.text(step, x + 38, guide_top + 48 + index * 30,
+                           w - 56, 26, 12.5, C.TEXT_SUB)
         finally:
             c.reset_clip()
 
@@ -493,15 +512,15 @@ class DesktopApp:
             text = C.TEXT
             bold = False
         offset = 1 if pressed else 0
-        c.rounded(x + 1, y + 2, w - 2, h - 2, 8, C.SHADOW)
-        c.rounded(x, y + offset, w, h - 2, 8, fill, border)
-        c.text(button["label"], x + 8, y + offset, w - 16, h - 2, 10.5,
+        c.rounded(x + 1, y + 2, w - 2, h - 2, 9, C.SHADOW)
+        c.rounded(x, y + offset, w, h - 2, 9, fill, border)
+        c.text(button["label"], x + 10, y + offset, w - 20, h - 2, 13,
                text, bold, gdi.ALIGN_CENTER)
 
     def _draw_lists(self, c, x: int, y: int, w: int, h: int) -> None:
-        gap = 14
-        notice_h = max(140, int((h - gap) * 0.44))
-        window_h = max(140, h - gap - notice_h)
+        gap = 16
+        notice_h = max(160, int((h - gap) * 0.44))
+        window_h = max(160, h - gap - notice_h)
         self._draw_list_card(c, x, y, w, notice_h, "最近通知",
                              self._notice_lines, LIST_ROW_NOTICE,
                              self._notice_scroll, "notice")
@@ -513,10 +532,10 @@ class DesktopApp:
                         scroll, which) -> None:
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
         c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
-        c.text(title, x + 16, y + 8, w - 32, 24, 12, C.TEXT, True)
-        c.rect(x + 16, y + 34, w - 32, 1, C.DIVIDER)
-        list_y = y + 40
-        list_h = h - 48
+        c.text(title, x + 18, y + 10, w - 36, 28, 14.5, C.TEXT, True)
+        c.rect(x + 18, y + 40, w - 36, 1, C.DIVIDER)
+        list_y = y + 48
+        list_h = h - 56
         self._list_rects[which] = (x, list_y, w, list_h)
 
         visible = max(1, list_h // row_h)
@@ -534,18 +553,18 @@ class DesktopApp:
                 line = lines[index]
                 offscreen = line.startswith("[越界]")
                 if offscreen:
-                    c.rounded(x + 12, row_y + 3, 4, row_h - 6, 1, C.DANGER)
+                    c.rounded(x + 14, row_y + 4, 5, row_h - 8, 2, C.DANGER)
                     color = C.DANGER
                 elif which == "notice" and " · " in line:
                     color = C.TEXT_SUB
                 else:
                     color = C.TEXT
-                c.text(line, x + 22, row_y, w - 36, row_h, 9.5, color)
+                c.text(line, x + 26, row_y, w - 42, row_h, 12, color)
         finally:
             c.reset_clip()
 
         if not lines:
-            c.text("暂无内容", x + 20, list_y, w - 40, 30, 10,
+            c.text("暂无内容", x + 22, list_y, w - 44, 32, 12,
                    C.TEXT_FAINT)
 
     # -------------------------------------------------------- 交互处理 --
@@ -595,6 +614,15 @@ class DesktopApp:
             self._left_scroll = max(0, self._left_scroll - delta)
         self._invalidate()
 
+    def _logical_pos(self, lparam) -> tuple[int, int]:
+        """把鼠标消息中的物理像素坐标换算为布局使用的逻辑坐标。"""
+        x = (lparam & 0xFFFF) / self.scale
+        y = ((lparam >> 16) & 0xFFFF) / self.scale
+        # 处理负数坐标（高 16 位有符号）
+        if (lparam >> 16) & 0x8000:
+            y = (((lparam >> 16) & 0xFFFF) - 0x10000) / self.scale
+        return int(x), int(y)
+
     # -------------------------------------------------------- 消息处理 --
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         try:
@@ -640,7 +668,7 @@ class DesktopApp:
                 return 1
 
             if msg == win32con.WM_MOUSEMOVE:
-                x, y = lparam & 0xFFFF, (lparam >> 16) & 0xFFFF
+                x, y = self._logical_pos(lparam)
                 hit = self._hit_test(x, y)
                 new_hover = hit[1] if hit else None
                 if new_hover != self._hover:
@@ -649,7 +677,7 @@ class DesktopApp:
                 return 0
 
             if msg == win32con.WM_LBUTTONDOWN:
-                x, y = lparam & 0xFFFF, (lparam >> 16) & 0xFFFF
+                x, y = self._logical_pos(lparam)
                 hit = self._hit_test(x, y)
                 if hit:
                     self._pressed = hit[1]
@@ -657,7 +685,7 @@ class DesktopApp:
                 return 0
 
             if msg == win32con.WM_LBUTTONUP:
-                x, y = lparam & 0xFFFF, (lparam >> 16) & 0xFFFF
+                x, y = self._logical_pos(lparam)
                 hit = self._hit_test(x, y)
                 previous = self._pressed
                 self._pressed = None
@@ -679,7 +707,12 @@ class DesktopApp:
                 delta = (int(wparam) >> 16) & 0xFFFF
                 if delta >= 0x8000:
                     delta -= 0x10000
-                x, y = lparam & 0xFFFF, (lparam >> 16) & 0xFFFF
+                sx = lparam & 0xFFFF
+                sy = (lparam >> 16) & 0xFFFF
+                if (lparam >> 16) & 0x8000:
+                    sy -= 0x10000
+                cx, cy = win32gui.ScreenToClient(hwnd, (sx, sy))
+                x, y = int(cx / self.scale), int(cy / self.scale)
                 self._apply_scroll(x, y, 1 if delta > 0 else -1)
                 return 0
 
