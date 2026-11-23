@@ -69,11 +69,17 @@ class ToolManager:
         for tool in self.tools:
             try:
                 actions: List[WebAction] = tool.get_ui_actions()
+                sections = []
+                getter = getattr(tool, "get_detail_sections", None)
+                if getter:
+                    sections = getter() or []
                 result.append({
                     "name": tool.name,
                     "version": tool.version,
                     "description": tool.description,
                     "status": tool.get_status(),
+                    "sections": sections,
+                    "pinned": bool(getattr(tool, "nav_pinned", False)),
                     "actions": [
                         {
                             "id": a.id, "label": a.label, "kind": a.kind,

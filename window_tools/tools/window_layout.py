@@ -23,6 +23,7 @@ from ..core.base_tool import BaseTool, MenuItem, WebAction
 from ..paths import LAYOUT_PATH
 from ..utils import winapi
 from ..utils.config import JsonStore
+from ..utils.hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT
 
 SAMPLE_INTERVAL = 1.5
 HISTORY_LIMIT = 60
@@ -57,20 +58,20 @@ class WindowLayoutTool(BaseTool):
 
     # ------------------------------------------------------------ 生命周期 --
     def on_load(self) -> None:
-        ca = win32con.MOD_CONTROL | win32con.MOD_ALT
-        cs = win32con.MOD_CONTROL | win32con.MOD_SHIFT
-        cas = ca | win32con.MOD_SHIFT
-        self._save_hotkey_label = self._register_with_fallback(
-            "layout.save", "S", self.save_manual,
-            [(ca, "Ctrl+Alt+S"), (cs, "Ctrl+Shift+S")],
+        ca = MOD_CONTROL | MOD_ALT
+        cs = MOD_CONTROL | MOD_SHIFT
+        cas = ca | MOD_SHIFT
+        self._save_hotkey_label = self.app.bind_hotkey(
+            "layout.save", self.name, "保存当前布局", self.save_manual,
+            [(ca, ord("S")), (cs, ord("S"))],
         )
-        self._restore_hotkey_label = self._register_with_fallback(
-            "layout.restore", "R", self.restore_auto,
-            [(ca, "Ctrl+Alt+R"), (cs, "Ctrl+Shift+R")],
+        self._restore_hotkey_label = self.app.bind_hotkey(
+            "layout.restore", self.name, "自动还原布局", self.restore_auto,
+            [(ca, ord("R")), (cs, ord("R"))],
         )
-        self._rescue_hotkey_label = self._register_with_fallback(
-            "layout.rescue", "M", self.rescue_offscreen,
-            [(ca, "Ctrl+Alt+M"), (cas, "Ctrl+Alt+Shift+M"), (cs, "Ctrl+Shift+M")],
+        self._rescue_hotkey_label = self.app.bind_hotkey(
+            "layout.rescue", self.name, "救援越界窗口", self.rescue_offscreen,
+            [(ca, ord("M")), (cas, ord("M")), (cs, ord("M"))],
         )
         self._thread = threading.Thread(
             target=self._sampler_loop, daemon=True, name="layout-sampler"
@@ -83,15 +84,6 @@ class WindowLayoutTool(BaseTool):
             self._restore_hotkey_label or "未注册",
             self._rescue_hotkey_label or "未注册",
         )
-
-    def _register_with_fallback(self, key: str, letter: str, callback,
-                                combos: list) -> str:
-        """热门组合键常被占用，逐个尝试直到注册成功。"""
-        for modifiers, label in combos:
-            if self.app.register_hotkey(key, modifiers, ord(letter), callback):
-                return label
-        self.log.warning("所有候选热键均被占用: %s", key)
-        return ""
 
     def on_unload(self) -> None:
         self._stop.set()
@@ -156,7 +148,8 @@ class WindowLayoutTool(BaseTool):
         count = len(snapshot["windows"])
         self.log.info("手动保存布局: %d 个窗口, 写入=%s", count, ok)
         self.app.notify(
-            f"已保存 {count} 个窗口的位置与大小" if ok else "保存失败，请检查 data 目录权限",
+            "已记下 %d 个窗口的位置。窗口不会移动，切换显示器后再还原才会用到"
+            % count if ok else "保存失败，请检查 data 目录权限",
             "保存布局",
         )
 
@@ -166,10 +159,7 @@ class WindowLayoutTool(BaseTool):
             self.app.notify("暂无可用快照，请先切换一次显示器模式")
             return
         result = self._restore(source, adaptive=True)
-        self.app.notify(
-            "已还原 {moved} 个窗口（离线 {missing}）".format(**result),
-            "窗口布局已还原",
-        )
+        self._notify_restore(result, adaptive=True)
 
     def restore_exact(self) -> None:
         with self._lock:
@@ -178,13 +168,30 @@ class WindowLayoutTool(BaseTool):
             self.app.notify("请先使用「保存当前布局」保存一份布局")
             return
         result = self._restore(source, adaptive=False)
-        self.app.notify(
-            "已精确还原 {moved} 个窗口（离线 {missing}）".format(**result),
-            "窗口布局已还原",
-        )
+        self._notify_restore(result, adaptive=False)
+
+    def _notify_restore(self, result: dict, adaptive: bool) -> None:
+        changed = result.get("changed", 0)
+        missing = result.get("missing", 0)
+        if changed:
+            self.app.notify(
+                "已调整 %d 个窗口的位置（离线 %d）" % (changed, missing),
+                "窗口布局已还原",
+            )
+            return
+        if adaptive:
+            self.app.notify(
+                "当前屏幕和记录时一样，窗口已经在原来的位置，所以没有移动",
+                "窗口布局",
+            )
+        else:
+            self.app.notify(
+                "窗口已经在保存时的位置，没有需要移动的",
+                "窗口布局",
+            )
 
     def rescue_offscreen(self) -> None:
-        """紧急兜底：把所有大部分不可见的窗口拉回屏幕中央。"""
+        """把伸出屏幕的窗口钳回所在显示器的工作区，尽量保持原位置。"""
         virtual = winapi.bounds_to_rect(winapi.get_virtual_bounds())
         monitors = winapi.get_monitors()
         monitor_rects = [m["rect"] for m in monitors]
@@ -194,25 +201,29 @@ class WindowLayoutTool(BaseTool):
             self.app.hwnd, self._name_cache
         ):
             rect = window["rect"]
-            if winapi.visible_ratio(rect, virtual) >= 0.35:
+            if winapi.is_zoomed(window["hwnd"]):
+                continue
+            if not winapi.is_offscreen(rect, virtual):
                 continue
             index = winapi.monitor_index_for_rect(rect, monitor_rects)
             monitor = monitors[index % len(monitors)] if monitors else None
             bounds = (monitor.get("work") or monitor["rect"]) if monitor else virtual
-            bw = max(1, bounds[2] - bounds[0])
-            bh = max(1, bounds[3] - bounds[1])
-            width = min(max(1, rect[2] - rect[0]), max(1, bw - 48))
-            height = min(max(1, rect[3] - rect[1]), max(1, bh - 48))
-            left = bounds[0] + (bw - width) // 2
-            top = bounds[1] + (bh - height) // 2
+            target = winapi.clamp_rect(rect, bounds)
+            if tuple(int(v) for v in target) == tuple(int(v) for v in rect):
+                continue
             try:
-                winapi.move_window(window["hwnd"], (left, top, left + width, top + height))
+                winapi.move_window(window["hwnd"], target)
                 moved += 1
+                self.log.info("越界救援: %s %s -> %s",
+                              window["title"], rect, target)
             except Exception as exc:
                 self.log.debug("救援窗口失败 %s: %s", window["title"], exc)
 
         self.log.info("越界救援完成: %d 个窗口", moved)
-        self.app.notify(f"已拉回 {moved} 个越界窗口", "窗口救援")
+        if moved:
+            self.app.notify(f"已拉回 {moved} 个越界窗口", "窗口救援")
+        else:
+            self.app.notify("没有发现伸出屏幕的窗口", "窗口救援")
 
     # ------------------------------------------------------------ 快照逻辑 --
     def _take_snapshot(self) -> dict:
@@ -321,7 +332,7 @@ class WindowLayoutTool(BaseTool):
         saved_monitors = source.get("monitors") or []
         current_monitors = winapi.get_monitors()
         virtual = winapi.bounds_to_rect(winapi.get_virtual_bounds())
-        moved, missing, skipped = 0, 0, 0
+        moved, changed, missing, skipped = 0, 0, 0, 0
 
         for saved in source.get("windows", []):
             hwnd = self._find_window(saved)
@@ -360,27 +371,40 @@ class WindowLayoutTool(BaseTool):
                     )
 
             try:
+                current = tuple(int(v) for v in win32gui.GetWindowRect(hwnd))
+            except Exception:
+                current = None
+            goal = tuple(int(v) for v in target)
+            if current is not None and all(
+                    abs(a - b) <= 2 for a, b in zip(current, goal)):
+                skipped += 1
+                continue
+            try:
                 winapi.move_window(hwnd, target)
                 moved += 1
+                changed += 1
             except Exception as exc:
                 self.log.debug("还原窗口失败 %s: %s", saved.get("title"), exc)
 
-        return {"moved": moved, "missing": missing, "skipped": skipped}
+        return {"moved": moved, "changed": changed, "missing": missing,
+                "skipped": skipped}
 
     # ---------------------------------------------------------- 网页动作 --
     def get_web_actions(self) -> list:
         return [
             WebAction(id="save", label="保存当前布局",
-                      hint="记录所有窗口的位置与大小；快捷键 "
-                           + (self._save_hotkey_label or "未注册"), tone="primary"),
+                      hint="只记录位置，不移动窗口；快捷键 "
+                           + (self.app.hotkey_label("layout.save") or "未注册"),
+                      tone="primary"),
             WebAction(id="restore", label="自动还原布局",
-                      hint="显示器切换后按比例还原窗口；快捷键 "
-                           + (self._restore_hotkey_label or "未注册"), tone="primary"),
+                      hint="屏幕变化后才把窗口放回去；快捷键 "
+                           + (self.app.hotkey_label("layout.restore") or "未注册"),
+                      tone="primary"),
             WebAction(id="restore_exact", label="精确还原", hint="按保存时的原始像素还原",
                       tone="default"),
             WebAction(id="rescue", label="救援越界窗口",
                       hint="把跑出屏幕的窗口拉回可见区域；快捷键 "
-                           + (self._rescue_hotkey_label or "未注册"),
+                           + (self.app.hotkey_label("layout.rescue") or "未注册"),
                       tone="warning"),
             WebAction(id="toggle_auto", label="自动检测切换", kind="toggle",
                       hint="切换显示器模式后自动还原", active=self.auto_enabled,

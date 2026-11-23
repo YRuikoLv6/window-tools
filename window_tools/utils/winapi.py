@@ -254,3 +254,28 @@ def visible_ratio(rect: Sequence[int], bounds: Sequence[int]) -> float:
     ih = max(0, min(b, bb) - max(t, bt))
     area = max(1, (r - l) * (b - t))
     return (iw * ih) / area
+
+
+def is_offscreen(rect: Sequence[int], bounds: Sequence[int],
+                 margin: int = 16) -> bool:
+    """窗口是否伸出可见区域。
+
+    只忽略十几像素的边框溢出，避免把最大化窗口当成越界。
+    原先用可见面积低于 35% 才算越界：单显示器上窗口往往还露着一大块，
+    但右侧或底部已经到了屏幕外，救援会被直接跳过。
+    """
+    l, t, r, b = (int(v) for v in rect)
+    bl, bt, br, bb = (int(v) for v in bounds)
+    if r - l <= 1 or b - t <= 1:
+        return False
+    return (
+        l < bl - margin or t < bt - margin
+        or r > br + margin or b > bb + margin
+    )
+
+
+def is_zoomed(hwnd: int) -> bool:
+    try:
+        return bool(ctypes.windll.user32.IsZoomed(int(hwnd)))
+    except Exception:
+        return False

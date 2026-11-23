@@ -29,6 +29,10 @@ from ..ui.tray import (
     TRAY_EXIT, TRAY_HIDE, TRAY_SHOW, TrayIcon, TrayMenu, WM_TRAYICON,
 )
 from ..utils import shortcut, winapi
+from ..utils.hotkeys import (
+    MOD_NOREPEAT, format_hotkey, is_modifier_vk, pressed_modifiers,
+    reject_reason,
+)
 
 # 单实例唤醒协议：第二实例定位已有窗口后投递 WM_SHOWME，由已有实例显示窗口。
 # WM_TRAYICON 占用 WM_USER + 100，这里错开避免冲突。
@@ -44,16 +48,21 @@ REFRESH_MS = 800
 DISPLAY_DEBOUNCE_MS = 1500
 SC_MONITORPOWER = getattr(win32con, "SC_MONITORPOWER", 0xF170)
 
-TITLE_H = 64
-PAD = 22
-INFO_H = 100
-CARD_RADIUS = 14
-BTN_H = 46
-BTN_GAP_X = 12
-BTN_GAP_Y = 12
-LIST_ROW_NOTICE = 32
-LIST_ROW_WINDOW = 30
-FOOTER_H = 28
+TITLE_H = 58
+PAD = 20
+STRIP_H = 40
+NAV_W = 208
+NAV_ROW = 54
+SETTINGS_ID = "__settings__"
+CARD_RADIUS = 12
+BTN_H = 48
+BTN_GAP_X = 10
+BTN_GAP_Y = 10
+LIST_ROW_NOTICE = 44
+LIST_ROW_WINDOW = 48
+FOOTER_H = 36
+SETTINGS_TOOL_ROW = 44
+SETTINGS_KEY_ROW = 64
 
 _user32 = ctypes.windll.user32
 _user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
@@ -62,6 +71,22 @@ _user32.SetTimer.restype = ctypes.c_uint
 _user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.KillTimer.restype = ctypes.c_bool
 
+WM_MOUSELEAVE = 0x02A2
+_TME_LEAVE = 0x00000002
+
+
+class _TrackMouseEvent(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("dwFlags", ctypes.c_uint),
+        ("hwndTrack", ctypes.c_void_p),
+        ("dwHoverTime", ctypes.c_uint),
+    ]
+
+
+_user32.TrackMouseEvent.argtypes = [ctypes.POINTER(_TrackMouseEvent)]
+_user32.TrackMouseEvent.restype = ctypes.c_bool
+
 
 def _set_timer(hwnd: int, timer_id: int, milliseconds: int) -> None:
     _user32.SetTimer(hwnd, timer_id, milliseconds, None)
@@ -69,6 +94,15 @@ def _set_timer(hwnd: int, timer_id: int, milliseconds: int) -> None:
 
 def _kill_timer(hwnd: int, timer_id: int) -> None:
     _user32.KillTimer(hwnd, timer_id)
+
+
+def _track_mouse_leave(hwnd: int) -> None:
+    info = _TrackMouseEvent()
+    info.cbSize = ctypes.sizeof(info)
+    info.dwFlags = _TME_LEAVE
+    info.hwndTrack = hwnd
+    info.dwHoverTime = 0
+    _user32.TrackMouseEvent(ctypes.byref(info))
 
 
 def _try_foreground(hwnd: int) -> None:
@@ -131,18 +165,28 @@ class DesktopApp:
         self._hotkey_ids: dict = {}
         self._hotkey_callbacks: dict = {}
         self._next_hotkey = 1
+        self._bindings: dict = {}
 
         self._tool_blocks: List[dict] = []
         self._hotspots: List[dict] = []
         self._list_rects: dict = {}
         self._hover = None
         self._pressed = None
-        self._left_scroll = 0
+        self._selected_tool = ""
+        self._nav_scroll = 0
+        self._action_scroll = 0
+        self._settings_scroll = 0
+        self._settings_nav_scroll = 0
+        self._settings_hotkey_tool = ""
         self._notice_scroll = 0
         self._window_scroll = 0
-        self._notice_lines: List[str] = []
-        self._window_lines: List[str] = []
+        self._notice_lines: List[dict] = []
+        self._window_lines: List[dict] = []
         self._metrics: List[Tuple[str, str, int]] = []
+        self._pointer: Tuple[int, int] | None = None
+        self._tracking_leave = False
+        self._notice_hits: List[dict] = []
+        self._pending_tip: dict | None = None
 
         self.tray: TrayIcon | None = None
         self.tray_menu: TrayMenu | None = None
@@ -168,7 +212,8 @@ class DesktopApp:
             self._hotkey_callbacks.pop(previous, None)
         hid = self._next_hotkey
         try:
-            win32gui.RegisterHotKey(self.hwnd, hid, modifiers, vk)
+            win32gui.RegisterHotKey(
+                self.hwnd, hid, int(modifiers) | MOD_NOREPEAT, vk)
         except Exception as exc:
             self.log.warning("热键注册失败 key=%s: %s", key, exc)
             return False
@@ -176,6 +221,162 @@ class DesktopApp:
         self._hotkey_ids[key] = hid
         self._hotkey_callbacks[hid] = callback
         return True
+
+    def bind_hotkey(self, binding_id: str, tool: str, title: str, callback,
+                    defaults: list) -> str:
+        """登记一个功能的默认快捷键，并按用户自定义或默认顺序注册。"""
+        self._bindings[binding_id] = {
+            "id": binding_id,
+            "tool": tool,
+            "title": title,
+            "callback": callback,
+            "defaults": [(int(mods), int(vk)) for mods, vk in defaults],
+            "label": "",
+            "modifiers": 0,
+            "vk": 0,
+        }
+        return self._apply_binding(binding_id)
+
+    def hotkey_label(self, binding_id: str) -> str:
+        binding = self._bindings.get(binding_id) or {}
+        return binding.get("label") or ""
+
+    def hotkey_rows(self, tool_name: str) -> list:
+        rows = []
+        for binding in self._bindings.values():
+            if binding["tool"] != tool_name:
+                continue
+            default = ""
+            if binding["defaults"]:
+                default = format_hotkey(*binding["defaults"][0])
+            rows.append({
+                "id": binding["id"],
+                "title": binding["title"],
+                "label": binding.get("label") or "未注册",
+                "default": default,
+                "custom": self._saved_hotkey(binding["id"]) is not None,
+            })
+        return rows
+
+    def _saved_hotkey(self, binding_id: str):
+        data = self.config.get("hotkeys") or {}
+        item = data.get(binding_id) if isinstance(data, dict) else None
+        if not isinstance(item, dict):
+            return None
+        try:
+            return int(item["modifiers"]), int(item["vk"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _combo_taken(self, binding_id: str, modifiers: int, vk: int) -> bool:
+        for other_id, other in self._bindings.items():
+            if other_id == binding_id or not other.get("label"):
+                continue
+            if other.get("modifiers") == modifiers and other.get("vk") == vk:
+                return True
+        return False
+
+    def _apply_binding(self, binding_id: str) -> str:
+        """有自定义组合时只注册它，默认组合不再响应。
+
+        自定义注册失败时也不退回默认，避免两套快捷键同时生效。
+        未自定义时才按默认候选依次尝试。
+        """
+        binding = self._bindings[binding_id]
+        saved = self._saved_hotkey(binding_id)
+        if saved:
+            modifiers, vk = saved
+            if (not self._combo_taken(binding_id, modifiers, vk)
+                    and self.register_hotkey(
+                        binding_id, modifiers, vk, binding["callback"])):
+                binding["modifiers"] = modifiers
+                binding["vk"] = vk
+                binding["label"] = format_hotkey(modifiers, vk)
+                return binding["label"]
+            binding["label"] = "未生效"
+            binding["modifiers"] = 0
+            binding["vk"] = 0
+            self.notify(
+                "%s 的自定义快捷键无法使用，默认快捷键已停用" % binding["title"],
+                "快捷键",
+            )
+            self.log.warning("自定义快捷键未能注册: %s", binding_id)
+            return ""
+
+        for modifiers, vk in binding["defaults"]:
+            if self._combo_taken(binding_id, modifiers, vk):
+                continue
+            if self.register_hotkey(
+                    binding_id, modifiers, vk, binding["callback"]):
+                binding["modifiers"] = modifiers
+                binding["vk"] = vk
+                binding["label"] = format_hotkey(modifiers, vk)
+                return binding["label"]
+        binding["label"] = ""
+        binding["modifiers"] = 0
+        binding["vk"] = 0
+        self.log.warning("快捷键未能注册: %s", binding_id)
+        return ""
+
+    def set_hotkey(self, binding_id: str, modifiers: int, vk: int) -> bool:
+        binding = self._bindings.get(binding_id)
+        if not binding:
+            return False
+        modifiers = int(modifiers) & ~MOD_NOREPEAT
+        reason = reject_reason(modifiers, vk)
+        if reason:
+            self.notify(reason, "快捷键")
+            return False
+        if self._combo_taken(binding_id, modifiers, vk):
+            self.notify("这个快捷键已经分给了其他功能", "快捷键")
+            return False
+        if not self.register_hotkey(
+                binding_id, modifiers, vk, binding["callback"]):
+            self.notify("这个快捷键已被其他程序占用", "快捷键")
+            self._apply_binding(binding_id)
+            return False
+        hotkeys = dict(self.config.get("hotkeys") or {})
+        first = binding["defaults"][:1]
+        if first and (modifiers, vk) == first[0]:
+            hotkeys.pop(binding_id, None)
+        else:
+            hotkeys[binding_id] = {"modifiers": modifiers, "vk": vk}
+        self.config.data["hotkeys"] = hotkeys
+        if not self.config.save():
+            self.notify("快捷键已切换，但写入配置失败", "快捷键")
+        binding["modifiers"] = modifiers
+        binding["vk"] = vk
+        binding["label"] = format_hotkey(modifiers, vk)
+        self.notify("%s 快捷键已改为 %s" % (
+            binding["title"], binding["label"]), "快捷键")
+        self._refresh()
+        return True
+
+    def reset_hotkey(self, binding_id: str) -> None:
+        binding = self._bindings.get(binding_id)
+        if not binding:
+            return
+        hotkeys = dict(self.config.get("hotkeys") or {})
+        hotkeys.pop(binding_id, None)
+        self.config.data["hotkeys"] = hotkeys
+        self.config.save()
+        label = self._apply_binding(binding_id)
+        self.notify("%s 已恢复默认快捷键 %s" % (
+            binding["title"], label or "未注册"), "快捷键")
+        self._refresh()
+
+    def _capture_hotkey(self, vk: int) -> None:
+        if (self._dialog or {}).get("kind") != "hotkey":
+            return
+        if is_modifier_vk(vk) or vk in (win32con.VK_ESCAPE, 0):
+            return
+        modifiers = pressed_modifiers()
+        reason = reject_reason(modifiers, vk)
+        if reason:
+            self.notify(reason, "快捷键")
+            return
+        if self.set_hotkey(self._dialog.get("id"), modifiers, vk):
+            self._close_dialog()
 
     def notify(self, message: str, title: str | None = None) -> None:
         title = title or self.title
@@ -396,36 +597,23 @@ class DesktopApp:
         level("桌面快捷方式：%s", result.get("message"))
         self.notify(result.get("message", "快捷方式操作完成"))
 
-    def _show_settings_menu(self) -> None:
-        """标题栏设置按钮：弹出菜单（非卡片形式）。"""
-        menu = win32gui.CreatePopupMenu()
-        try:
-            exists = shortcut.shortcut_exists()
-            label = "更新桌面快捷方式" if exists else "生成桌面快捷方式"
-            win32gui.AppendMenu(menu, win32con.MF_STRING, 3001, label)
-            win32gui.AppendMenu(menu, win32con.MF_STRING, 3002,
-                                "重新询问快捷方式选择")
-            try:
-                _user32.SetForegroundWindow(ctypes.c_void_p(self.hwnd))
-            except Exception:
-                pass
-            pos = win32gui.GetCursorPos()
-            cmd = win32gui.TrackPopupMenu(
-                menu, win32con.TPM_RETURNCMD | win32con.TPM_RIGHTALIGN,
-                pos[0], pos[1], 0, self.hwnd, None,
-            )
-            win32gui.PostMessage(self.hwnd, win32con.WM_NULL, 0, 0)
-            if cmd == 3001:
-                self._create_shortcut_action()
-            elif cmd == 3002:
-                sc = dict(self.config.get("shortcut", {}) or {})
-                sc["asked"] = False
-                sc["remember"] = False
-                self.config.data["shortcut"] = sc
-                self.config.save()
-                self.notify("下次启动将重新询问快捷方式")
-        finally:
-            win32gui.DestroyMenu(menu)
+    def _open_settings(self) -> None:
+        """打开设置页，而不是系统弹出菜单。"""
+        current = self._selected_tool
+        if current and current != SETTINGS_ID:
+            self._settings_hotkey_tool = current
+        self._selected_tool = SETTINGS_ID
+        self._settings_scroll = 0
+        self._invalidate()
+
+    def _reset_shortcut_prompt(self) -> None:
+        sc = dict(self.config.get("shortcut", {}) or {})
+        sc["asked"] = False
+        sc["remember"] = False
+        self.config.data["shortcut"] = sc
+        self.config.save()
+        self.notify("下次启动将重新询问是否创建桌面快捷方式")
+        self._invalidate()
 
     def _handle_tray_message(self, lparam) -> None:
         """处理托盘回调（双击显示/隐藏，右键弹出菜单）。"""
@@ -469,7 +657,10 @@ class DesktopApp:
             self._tool_blocks.append({
                 "name": tool["name"],
                 "version": tool["version"],
+                "description": tool.get("description") or "",
                 "status": tool["status"],
+                "sections": tool.get("sections") or [],
+                "pinned": bool(tool.get("pinned")),
                 "buttons": buttons,
             })
 
@@ -506,7 +697,8 @@ class DesktopApp:
             ]
 
             self._notice_lines = [
-                f"{n['time']}  {n['title']} · {n['message']}"
+                {"time": n["time"], "title": n["title"],
+                 "message": n["message"]}
                 for n in reversed(list(self.notices))
             ]
 
@@ -514,19 +706,22 @@ class DesktopApp:
             lines = []
             for window in winapi.enumerate_windows(self.hwnd):
                 rect = window["rect"]
-                off = winapi.visible_ratio(rect, virtual) < 0.35
-                prefix = "[越界] " if off else ""
-                title = window["title"].replace("\n", " ")
                 left, top, right, bottom = rect
-                size = f"{right - left}×{bottom - top}"
-                head = f"{prefix}{title}"
-                process = window["process"]
-                if process:
-                    head += f"  —  {process}"
-                lines.append(f"{head}  ·  {left},{top}  {size}")
+                lines.append({
+                    "off": winapi.is_offscreen(rect, virtual),
+                    "title": window["title"].replace("\n", " ") or "(无标题)",
+                    "process": window["process"] or "",
+                    "pos": f"{left}, {top}",
+                    "size": f"{right - left}×{bottom - top}",
+                })
             self._window_lines = lines
 
             if self.manager:
+                for block in self._tool_blocks:
+                    tool_obj = self.manager.find(block["name"])
+                    if (tool_obj and self._selected_name() == block["name"]
+                            and hasattr(tool_obj, "refresh_if_stale")):
+                        tool_obj.refresh_if_stale(5)
                 descriptions = {t["name"]: t
                                 for t in self.manager.describe_tools()}
                 for block in self._tool_blocks:
@@ -534,13 +729,17 @@ class DesktopApp:
                     if not tool:
                         continue
                     block["status"] = tool["status"]
+                    block["sections"] = tool.get("sections") or []
                     active = {a["id"]: a["active"] for a in tool["actions"]
                               if a["kind"] == "toggle"}
+                    hints = {a["id"]: a.get("hint", "")
+                             for a in tool["actions"]}
                     for button in block["buttons"]:
                         if button["id"] in active:
                             button["active"] = active[button["id"]]
-                            button["label"] = button["base_label"] + \
-                                ("  [开]" if button["active"] else "  [关]")
+                        button["label"] = button["base_label"]
+                        if button["id"] in hints:
+                            button["hint"] = hints[button["id"]]
             self._clamp_scroll()
             self._invalidate()
         except Exception:
@@ -593,78 +792,124 @@ class DesktopApp:
         c.clear(C.BG)
         self._hotspots = []
         self._list_rects = {}
+        self._notice_hits = []
+        self._pending_tip = None
 
-        # 标题栏
+        # 标题栏：深色底 + 底部主色细线
+        c.rect(0, 0, w, TITLE_H, C.HEADER_A)
         c.rounded(0, 0, w, TITLE_H, 1, C.HEADER_A, gradient=C.HEADER_B)
-        c.rounded(18, 16, 34, 34, 9, gdi.argb(255, 255, 255, 42))
-        c.text("窗", 18, 16, 34, 34, 17, gdi.argb(255, 255, 255), True,
+        c.rect(0, TITLE_H - 2, w, 2, C.HEADER_LINE)
+
+        c.rounded(16, 12, 34, 34, 10, C.PRIMARY)
+        c.text("窗", 16, 12, 34, 34, 16, gdi.argb(255, 255, 255), True,
                gdi.ALIGN_CENTER)
-        c.text("窗口工具集合", 62, 10, 240, 28, 19,
+        c.text("窗口工具集合", 60, 8, 280, 26, 17,
                gdi.argb(255, 255, 255), True)
-        c.text("多显示器窗口布局守护 · 自绘界面", 62, 37, 280, 20, 11.5,
-               gdi.argb(255, 255, 255, 195))
 
-        settings_rect = (w - 120, 17, 32, 32)
-        min_rect = (w - 82, 17, 32, 32)
-        close_rect = (w - 44, 17, 32, 32)
-        # 设置按钮（弹出菜单，不做卡片）
-        st_hover = self._hover == "settings"
-        st_press = self._pressed == "settings"
-        st_fill = gdi.argb(255, 255, 255, 58 if st_press else
-                           (42 if st_hover else 0))
-        if st_fill:
-            c.rounded(settings_rect[0], settings_rect[1], 32, 32, 7, st_fill)
-        c.text("设", settings_rect[0], settings_rect[1] - 1, 32, 34, 13,
-               gdi.argb(255, 255, 255), False, gdi.ALIGN_CENTER)
-        self._hotspots.append({"kind": "settings", "rect": settings_rect})
+        ctrl = 30
+        gap = 6
+        close_rect = (w - 14 - ctrl, 14, ctrl, ctrl)
+        min_rect = (close_rect[0] - gap - ctrl, 14, ctrl, ctrl)
+        settings_rect = (min_rect[0] - gap - 56, 14, 56, ctrl)
+        c.text("左侧切换功能，中间只显示当前功能的操作", 60, 32,
+               max(80, settings_rect[0] - 72), 18, 11, gdi.argb(203, 213, 225))
+        self._draw_caption_button(c, "settings", settings_rect, "设置", 12)
+        self._draw_caption_button(c, "min", min_rect, "–", 16)
+        self._draw_caption_button(c, "close", close_rect, "×", 16)
 
-        for kind, rect, glyph in (("min", min_rect, "–"),
-                                  ("close", close_rect, "×")):
-            hovered = self._hover == kind
-            pressed = self._pressed == kind
-            fill = gdi.argb(255, 255, 255, 58 if pressed else
-                            (42 if hovered else 0))
-            if fill:
-                c.rounded(rect[0], rect[1], rect[2], rect[3], 7, fill)
-            color = gdi.argb(255, 255, 255) if kind != "close" or not hovered \
-                else gdi.argb(255, 255, 225, 225)
-            c.text(glyph, rect[0], rect[1] - 1, rect[2], rect[3] + 2, 18,
-                   color, False, gdi.ALIGN_CENTER)
-            self._hotspots.append({"kind": kind, "rect": rect})
+        self._draw_metric_strip(c, w)
 
-        # 指标卡片
-        info_y = TITLE_H + 16
-        card_w = w - 2 * PAD
-        c.rounded(PAD, info_y + 3, card_w, INFO_H, CARD_RADIUS, C.SHADOW)
-        c.rounded(PAD, info_y, card_w, INFO_H, CARD_RADIUS, C.CARD, C.BORDER)
-        cell_w = (card_w - 32) // max(1, len(self._metrics))
-        for index, (label, value, accent) in enumerate(self._metrics):
-            x = PAD + 18 + index * cell_w
-            c.rounded(x, info_y + 24, 4, 52, 2, accent)
-            c.text(label, x + 14, info_y + 16, cell_w - 22, 24, 11.5,
-                   C.TEXT_SUB)
-            c.text(value, x + 14, info_y + 42, cell_w - 22, 32, 17,
-                   C.TEXT, True)
+        body_y = TITLE_H + STRIP_H + 12
+        body_h = max(120, h - body_y - FOOTER_H - 8)
+        gap = 12
+        remain = max(360, w - 2 * PAD - NAV_W - gap)
+        list_w = max(250, int(remain * 0.46))
+        main_w = remain - gap - list_w
+        if main_w < 300:
+            list_w = max(220, remain - gap - 300)
+            main_w = remain - gap - list_w
+        main_x = PAD + NAV_W + gap
+        list_x = main_x + main_w + gap
 
-        body_y = info_y + INFO_H + 16
-        body_h = max(120, h - body_y - FOOTER_H - 16)
-        left_w = max(380, int((w - 2 * PAD - 18) * 0.58))
-        right_x = PAD + left_w + 18
-        right_w = max(280, w - PAD - right_x)
+        self._draw_nav(c, PAD, body_y, NAV_W, body_h)
+        if self._selected_name() == SETTINGS_ID:
+            self._draw_settings_page(c, main_x, body_y, main_w, body_h)
+        else:
+            self._draw_tool_page(c, main_x, body_y, main_w, body_h)
+        self._draw_lists(c, list_x, body_y, list_w, body_h)
 
-        self._list_rects["tools"] = (PAD, body_y, left_w, body_h)
-        self._draw_tools(c, PAD, body_y, left_w, body_h)
-        self._draw_lists(c, right_x, body_y, right_w, body_h)
-
-        footer_y = h - FOOTER_H - 4
-        c.text("所有操作都在左侧工具卡片 · 全局热键见状态行 · 数据保存在 data 目录",
-               PAD, footer_y, w - 2 * PAD, FOOTER_H, 11.5, C.TEXT_FAINT)
+        self._draw_footer(c, w, h)
+        self._draw_notice_tip(c, w, h)
 
         if self._dialog is not None:
-            if self._dialog.get("kind") == "shortcut":
+            kind = self._dialog.get("kind")
+            if kind == "shortcut":
                 self._draw_shortcut_dialog(c, w, h)
+            elif kind == "hotkey":
+                self._draw_hotkey_dialog(c, w, h)
             else:
                 self._draw_close_dialog(c, w, h)
+
+    def _draw_caption_button(self, c, kind: str, rect, glyph: str,
+                             size: float) -> None:
+        x, y, bw, bh = rect
+        hovered = self._hover == kind
+        pressed = self._pressed == kind
+        if kind == "close" and (hovered or pressed):
+            fill = C.DANGER_DARK if pressed else C.DANGER
+            color = gdi.argb(255, 255, 255)
+        elif hovered or pressed:
+            fill = gdi.argb(255, 255, 255, 64 if pressed else 36)
+            color = gdi.argb(255, 255, 255)
+        else:
+            fill = 0
+            color = gdi.argb(226, 232, 240)
+        if fill:
+            c.rounded(x, y, bw, bh, 8, fill)
+        weight = kind == "settings"
+        c.text(glyph, x, y - 1, bw, bh + 2, size, color, weight,
+               gdi.ALIGN_CENTER)
+        self._hotspots.append({"kind": kind, "rect": rect})
+
+    def _footer_text(self) -> str:
+        chips = []
+        selected = self._selected_name()
+        if selected == SETTINGS_ID:
+            return "设置  ·  自定义快捷键会停用默认组合，可在此恢复默认"
+        for block in self._tool_blocks:
+            if selected and block["name"] != selected:
+                continue
+            for button in block["buttons"]:
+                hint = button.get("hint") or ""
+                raw = button.get("base_label") or button.get("label")
+                label = {
+                    "保存当前布局": "保存",
+                    "自动还原布局": "还原",
+                    "救援越界窗口": "救援",
+                    "刷新信息": "刷新",
+                }.get(raw, raw)
+                if "快捷键" in hint:
+                    key = hint.split("快捷键", 1)[1].split("；")[0].strip(" ：")
+                    if key and "未注册" not in key:
+                        chips.append(f"{label} {key}")
+                elif hint.startswith("切换 "):
+                    key = hint.split("；")[0].replace("切换 ", "").strip()
+                    if key and "未注册" not in key:
+                        chips.append(f"锁定 {key}")
+                    if "强制解锁" in hint:
+                        unlock = hint.split("强制解锁", 1)[1].strip()
+                        if unlock:
+                            chips.append(f"解锁 {unlock}")
+        if not chips:
+            return "在左侧选择功能  ·  数据保存在 data 目录"
+        return "   ·   ".join(chips)
+
+    def _draw_footer(self, c, w: int, h: int) -> None:
+        y = h - FOOTER_H
+        c.rect(0, y, w, 1, C.DIVIDER)
+        c.rect(0, y + 1, w, FOOTER_H - 1, C.CARD)
+        c.text(self._footer_text(), PAD, y + 1, w - 2 * PAD, FOOTER_H - 1,
+               11.5, C.TEXT_SUB)
 
     def _draw_dialog_button(self, c, kind, label, tone, rect) -> None:
         """通用对话框按钮：primary / danger / default。"""
@@ -673,7 +918,7 @@ class DesktopApp:
         pressed = self._pressed == kind
         if tone == "primary":
             fill = C.PRIMARY_DARK if pressed else (
-                C.PRIMARY if hovered else C.PRIMARY)
+                C.PRIMARY_HOVER if hovered else C.PRIMARY)
             border = None
             color = gdi.argb(255, 255, 255)
             bold = True
@@ -688,23 +933,23 @@ class DesktopApp:
             color = C.TEXT_SUB
             bold = False
         offset = 1 if pressed else 0
-        c.rounded(x + 1, y + 2, bw - 2, bh - 2, 9, C.SHADOW)
-        c.rounded(x, y + offset, bw, bh - 2, 9, fill, border)
+        c.rounded(x, y + 2, bw, bh - 2, 10, C.SHADOW)
+        c.rounded(x, y + offset, bw, bh - 2, 10, fill, border)
         c.text(label, x, y + offset, bw, bh - 2, 13, color, bold,
                gdi.ALIGN_CENTER)
         self._hotspots.append({"kind": kind, "rect": rect})
 
     def _draw_shortcut_dialog(self, c, w: int, h: int) -> None:
         """启动询问框：是否创建桌面快捷方式 + 保持选择勾选。"""
-        c.rect(0, 0, w, h, gdi.argb(130, 14, 22, 40))
+        c.rect(0, 0, w, h, gdi.argb(15, 23, 42, 120))
         dw, dh = 500, 292
         dx = max(12, (w - dw) // 2)
         dy = max(12, (h - dh) // 2)
-        c.rounded(dx, dy + 6, dw, dh, 18, gdi.argb(48, 12, 22, 42))
-        c.rounded(dx, dy, dw, dh, 18, C.CARD, C.BORDER)
+        c.rounded(dx + 4, dy + 8, dw, dh, 16, C.SHADOW)
+        c.rounded(dx, dy, dw, dh, 16, C.CARD, C.BORDER)
 
         c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
-        c.text("捷", dx + 24, dy + 23, 44, 46, 22, C.PRIMARY, True,
+        c.text("捷", dx + 24, dy + 24, 44, 44, 20, C.PRIMARY, True,
                gdi.ALIGN_CENTER)
         c.text("桌面快捷方式", dx + 80, dy + 22, dw - 104, 30, 18,
                C.TEXT, True)
@@ -718,8 +963,8 @@ class DesktopApp:
         keep = bool(self._dialog.get("keep", False))
         kb_rect = (dx + 26, dy + 132, 20, 20)
         kh = self._hover == "dlg_sc_keep"
-        c.rounded(kb_rect[0], kb_rect[1], 20, 20, 5,
-                  C.PRIMARY if keep else (C.CARD_SOFT if kh else C.CARD),
+        c.rounded(kb_rect[0], kb_rect[1], 20, 20, 6,
+                  C.PRIMARY if keep else (C.PRIMARY_SOFT if kh else C.CARD),
                   C.PRIMARY if keep else C.BORDER)
         if keep:
             c.text("✓", kb_rect[0], kb_rect[1] - 2, 20, 22, 15,
@@ -748,16 +993,16 @@ class DesktopApp:
     def _draw_close_dialog(self, c, w: int, h: int) -> None:
         """自绘模态确认框：隐藏到托盘 / 退出程序 / 取消。"""
         # 半透明遮罩，背景仍可辨认但不可交互
-        c.rect(0, 0, w, h, gdi.argb(130, 14, 22, 40))
+        c.rect(0, 0, w, h, gdi.argb(15, 23, 42, 120))
 
         dw, dh = 470, 252
         dx = max(12, (w - dw) // 2)
         dy = max(12, (h - dh) // 2)
-        c.rounded(dx, dy + 6, dw, dh, 18, gdi.argb(48, 12, 22, 42))
-        c.rounded(dx, dy, dw, dh, 18, C.CARD, C.BORDER)
+        c.rounded(dx + 4, dy + 8, dw, dh, 16, C.SHADOW)
+        c.rounded(dx, dy, dw, dh, 16, C.CARD, C.BORDER)
 
         c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
-        c.text("?", dx + 24, dy + 23, 44, 46, 25, C.PRIMARY, True,
+        c.text("?", dx + 24, dy + 24, 44, 44, 22, C.PRIMARY, True,
                gdi.ALIGN_CENTER)
         c.text("关闭窗口", dx + 80, dy + 22, dw - 104, 30, 18, C.TEXT, True)
         c.text("隐藏到托盘后程序继续运行，可从任务栏图标唤出",
@@ -780,99 +1025,593 @@ class DesktopApp:
             self._draw_dialog_button(c, kind, label, tone,
                                      (bx, by, bw, bh))
 
-    def _draw_tools(self, c, x: int, y: int, w: int, h: int) -> None:
-        # 先测量总高度以支持滚动
-        cards = []
-        cur_y = y
+    def _selected_name(self) -> str:
+        if self._selected_tool == SETTINGS_ID:
+            return SETTINGS_ID
+        names = [block["name"] for block in self._tool_blocks]
+        if self._selected_tool in names:
+            return self._selected_tool
+        return names[0] if names else ""
+
+    def _selected_block(self) -> dict | None:
+        name = self._selected_name()
         for block in self._tool_blocks:
-            per_row = max(1, (w - 36 + BTN_GAP_X) // 170)
-            buttons = block["buttons"]
-            rows = max(1, (len(buttons) + per_row - 1) // per_row)
-            card_h = 16 + 28 + 26 + rows * BTN_H + \
-                (rows - 1) * BTN_GAP_Y + 14
-            cards.append((block, cur_y, card_h, per_row))
-            cur_y += card_h + 16
-        guide_h = 126
-        total_h = max(0, cur_y - y - 16) + guide_h + 16
-        max_scroll = max(0, total_h - h)
-        self._left_scroll = min(self._left_scroll, max_scroll)
+            if block["name"] == name:
+                return block
+        return None
+
+    @staticmethod
+    def _clip_rect(rect, bounds):
+        x, y, w, h = rect
+        bx, by, bw, bh = bounds
+        x2, y2 = min(x + w, bx + bw), min(y + h, by + bh)
+        x, y = max(x, bx), max(y, by)
+        if x2 <= x or y2 <= y:
+            return None
+        return x, y, x2 - x, y2 - y
+
+    def _draw_metric_strip(self, c, w: int) -> None:
+        y = TITLE_H
+        c.rect(0, y, w, STRIP_H, C.CARD)
+        c.rect(0, y + STRIP_H - 1, w, 1, C.DIVIDER)
+        metrics = self._metrics or [("屏幕", "—", C.TEXT_FAINT)]
+        cell = max(80, (w - 2 * PAD) // len(metrics))
+        for index, (label, value, accent) in enumerate(metrics):
+            x = PAD + index * cell
+            c.ellipse(x, y + 16, 8, 8, accent)
+            c.text(f"{label}  {value}", x + 14, y, cell - 22, STRIP_H,
+                   12, C.TEXT)
+
+    def _draw_nav(self, c, x: int, y: int, w: int, h: int) -> None:
+        c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
+        c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
+        scroll_blocks = [b for b in self._tool_blocks if not b.get("pinned")]
+        pinned_blocks = [b for b in self._tool_blocks if b.get("pinned")]
+        c.text("功能", x + 16, y + 8, w - 70, 28, 14, C.TEXT, True)
+        count = str(len(scroll_blocks))
+        badge_w = max(28, int(c.measure(count, 11) + 14))
+        c.rounded(x + w - badge_w - 14, y + 12, badge_w, 22, 11,
+                  C.PRIMARY_SOFT)
+        c.text(count, x + w - badge_w - 14, y + 12, badge_w, 22, 11,
+               C.PRIMARY, False, gdi.ALIGN_CENTER)
+
+        footer_rows = len(pinned_blocks) + 1
+        list_y = y + 44
+        list_h = max(40, h - 56 - footer_rows * NAV_ROW - 8)
+        bounds = (x, list_y, w, list_h)
+        self._list_rects["nav"] = bounds
+        total_h = max(NAV_ROW, len(scroll_blocks) * NAV_ROW)
+        max_scroll = max(0, total_h - list_h)
+        self._nav_scroll = min(self._nav_scroll, max_scroll)
 
         palette = [C.PRIMARY, C.WARNING, C.SUCCESS]
-        c.clip(x, y, w, h)
+        c.clip(x + 8, list_y, w - 16, list_h)
         try:
-            for index, (block, card_y, card_h, per_row) in enumerate(cards):
-                top = card_y - self._left_scroll
-                if top + card_h < y or top > y + h:
+            for index, block in enumerate(scroll_blocks):
+                ry = list_y + index * NAV_ROW - self._nav_scroll
+                if ry + NAV_ROW < list_y or ry > list_y + list_h:
                     continue
                 accent = palette[index % len(palette)]
-                c.rounded(x, top + 3, w, card_h, CARD_RADIUS, C.SHADOW)
-                c.rounded(x, top, w, card_h, CARD_RADIUS, C.CARD, C.BORDER)
-
-                # 工具图标提升可辨识度，颜色随工具轮换
-                c.rounded(x + 18, top + 14, 30, 30, 9, accent)
-                glyph = block["name"][:1] or "工"
-                c.text(glyph, x + 18, top + 14, 30, 30, 14,
-                       gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
-                c.text(block["name"], x + 58, top + 12, w - 160, 28, 15,
-                       C.TEXT, True)
-                badge_w = 64
-                c.rounded(x + w - badge_w - 18, top + 14, badge_w, 24, 12,
-                          C.PRIMARY_SOFT)
-                c.text("v" + block["version"], x + w - badge_w - 18,
-                       top + 14, badge_w, 24, 10.5, C.PRIMARY, False,
-                       gdi.ALIGN_CENTER)
-
-                status = block["status"]
-                active = ("开" in status or "已锁定" in status
-                          or "已保存" in status)
-                c.ellipse(x + 20, top + 50, 8, 8,
-                          C.SUCCESS if active else accent)
-                c.text(status, x + 36, top + 44, w - 54, 26, 12,
-                       C.TEXT_SUB)
-
-                btn_w = (w - 36 - (per_row - 1) * BTN_GAP_X) // per_row
-                for btn_index, button in enumerate(block["buttons"]):
-                    row, col = divmod(btn_index, per_row)
-                    bx = x + 18 + col * (btn_w + BTN_GAP_X)
-                    by = top + 78 + row * (BTN_H + BTN_GAP_Y)
-                    rect = (bx, by, btn_w, BTN_H)
-                    self._draw_button(c, button, rect)
-                    self._hotspots.append({
-                        "kind": "action", "rect": rect,
-                        "tool": block["name"], "action": button["id"],
-                    })
-
-            # 快速上手卡片（宿主级提示，不随工具增减变化）
-            guide_top = cur_y - self._left_scroll
-            if guide_top + guide_h >= y and guide_top <= y + h:
-                c.rounded(x, guide_top + 3, w, guide_h, CARD_RADIUS, C.SHADOW)
-                c.rounded(x, guide_top, w, guide_h, CARD_RADIUS,
-                          C.CARD_SOFT, C.BORDER)
-                c.text("快速上手", x + 18, guide_top + 10, w - 36, 26,
-                       15, C.TEXT, True)
-                c.rect(x + 18, guide_top + 38, w - 36, 1, C.DIVIDER)
-                steps = [
-                    "1  先点「保存当前布局」，记录窗口位置与大小",
-                    "2  切换显示器模式（如 4K ↔ 1K），布局自动按比例还原",
-                    "3  窗口越界可救援，鼠标可用锁定工具固定在当前屏幕",
-                ]
-                for step_index, step in enumerate(steps):
-                    offset = guide_top + 42 + step_index * 25
-                    c.ellipse(x + 20, offset + 6, 8, 8,
-                              C.PRIMARY if step_index == 0 else C.TEXT_FAINT)
-                    c.text(step, x + 38, offset, w - 56, 24, 12.5,
-                           C.TEXT_SUB)
+                self._draw_nav_tool(c, x, ry, w, block, accent, bounds)
         finally:
             c.reset_clip()
+        self._draw_scrollbar(c, x + w - 8, list_y, list_h,
+                             self._nav_scroll, max_scroll, list_h, total_h)
 
-        if max_scroll > 0:
-            track_x, track_y = x + w - 5, y + 4
-            track_h = h - 8
-            c.rounded(track_x, track_y, 3, track_h, 1, C.DIVIDER)
-            thumb_h = max(30, int(track_h * h / total_h))
-            thumb_y = track_y + int((track_h - thumb_h) *
-                                    self._left_scroll / max_scroll)
-            c.rounded(track_x, thumb_y, 3, thumb_h, 1, C.PRIMARY)
+        footer_y = y + h - footer_rows * NAV_ROW - 4
+        c.rect(x + 16, footer_y - 4, w - 32, 1, C.DIVIDER)
+        for index, block in enumerate(pinned_blocks):
+            accent = palette[(len(scroll_blocks) + index) % len(palette)]
+            self._draw_nav_tool(
+                c, x, footer_y + index * NAV_ROW, w, block, accent, None)
+
+        settings_y = footer_y + len(pinned_blocks) * NAV_ROW
+        row = (x + 10, settings_y, w - 20, NAV_ROW - 8)
+        active = self._selected_name() == SETTINGS_ID
+        hovered = self._hover == "nav_settings"
+        if active:
+            c.rounded(row[0], row[1], row[2], row[3], 10, C.PRIMARY_SOFT)
+        elif hovered:
+            c.rounded(row[0], row[1], row[2], row[3], 10, C.CARD_SOFT)
+        self._draw_icon_tile(
+            c, "settings", row[0] + 12, row[1] + 8, 28, C.TEXT)
+        c.text("设置", row[0] + 48, row[1], row[2] - 58, row[3], 13,
+               C.TEXT, active)
+        self._hotspots.append({"kind": "nav_settings", "rect": row})
+
+    def _feature_icon(self, name: str) -> str:
+        return {
+            "窗口布局守护": "layout",
+            "鼠标屏幕锁定": "mouse",
+            "本机信息": "device",
+        }.get(name, "generic")
+
+    def _draw_icon_tile(self, c, kind: str, x, y, size, fill) -> None:
+        c.rounded(x, y, size, size, max(6, size * 0.28), fill)
+        if kind == "generic":
+            c.text("工", x, y, size, size, size * 0.42,
+                   gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
+            return
+        self._draw_icon_glyph(c, kind, x, y, size)
+
+    def _draw_icon_glyph(self, c, kind: str, x, y, size) -> None:
+        white = gdi.argb(255, 255, 255)
+        pad = size * 0.22
+        inner = size - pad * 2
+        origin_x = x + pad
+        origin_y = y + pad
+        stroke = max(1.25, size * 0.065)
+
+        def at(u, v):
+            return origin_x + inner * u / 16, origin_y + inner * v / 16
+
+        def box(u, v, w, h):
+            px, py = at(u, v)
+            return px, py, inner * w / 16, inner * h / 16
+
+        if kind == "layout":
+            for u, v in ((1, 1), (9, 1), (1, 9), (9, 9)):
+                px, py, w, h = box(u, v, 6, 6)
+                c.rounded(px, py, w, h, max(1.2, size * 0.06), white)
+            return
+        if kind == "mouse":
+            raw = (
+                (1.4, 1.0), (1.4, 13.6), (5.3, 9.8),
+                (8.2, 14.8), (10.5, 13.6), (7.6, 8.7), (12.4, 8.7),
+            )
+            c.polygon([at(u, v) for u, v in raw], white)
+            return
+        if kind == "device":
+            px, py, w, h = box(1.2, 1.0, 13.6, 9.2)
+            c.stroke_rounded(px, py, w, h, max(1.4, size * 0.08), white, stroke)
+            x1, y1 = at(8, 10.4)
+            x2, y2 = at(8, 13.0)
+            c.line(x1, y1, x2, y2, white, stroke)
+            x1, y1 = at(4.6, 13.2)
+            x2, y2 = at(11.4, 13.2)
+            c.line(x1, y1, x2, y2, white, stroke)
+            return
+        if kind == "settings":
+            rows = ((3.1, 4.6), (8.0, 11.0), (12.9, 7.2))
+            knob = max(2.2, inner * 0.16)
+            for row_y, knob_x in rows:
+                x1, y1 = at(1.4, row_y)
+                x2, _ = at(14.6, row_y)
+                c.line(x1, y1, x2, y1, white, stroke)
+                cx, cy = at(knob_x, row_y)
+                c.ellipse(cx - knob / 2, cy - knob / 2, knob, knob, white)
+            return
+
+    def _draw_nav_tool(self, c, x, y, w, block, accent, bounds) -> None:
+        row = (x + 10, y + 4, w - 20, NAV_ROW - 8)
+        active = block["name"] == self._selected_name()
+        hovered = self._hover == block["name"]
+        if active:
+            c.rounded(row[0], row[1], row[2], row[3], 10, C.PRIMARY_SOFT)
+            c.rounded(row[0], row[1] + 8, 3, row[3] - 16, 1, accent)
+        elif hovered:
+            c.rounded(row[0], row[1], row[2], row[3], 10, C.CARD_SOFT)
+        self._draw_icon_tile(
+            c, self._feature_icon(block["name"]),
+            row[0] + 12, row[1] + 8, 28, accent)
+        c.text(block["name"], row[0] + 48, row[1], row[2] - 58,
+               row[3], 13, C.TEXT, active)
+        hit = row if bounds is None else self._clip_rect(row, bounds)
+        if hit:
+            self._hotspots.append({
+                "kind": "tool", "rect": hit, "tool": block["name"],
+            })
+
+    def _draw_tool_page(self, c, x: int, y: int, w: int, h: int) -> None:
+        c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
+        c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
+        block = self._selected_block()
+        if block is None:
+            c.text("还没有注册功能", x + 20, y + 24, w - 40, 28, 14, C.TEXT_SUB)
+            return
+
+        accent = C.PRIMARY
+        for index, item in enumerate(self._tool_blocks):
+            if item["name"] == block["name"]:
+                accent = [C.PRIMARY, C.WARNING, C.SUCCESS][index % 3]
+                break
+        self._draw_icon_tile(
+            c, self._feature_icon(block["name"]), x + 18, y + 16, 36, accent)
+        badge = "v" + block["version"]
+        badge_w = max(52, int(c.measure(badge, 11) + 16))
+        c.text(block["name"], x + 64, y + 14, w - 84 - badge_w, 24, 16,
+               C.TEXT, True)
+        c.rounded(x + w - badge_w - 16, y + 16, badge_w, 22, 11, C.PRIMARY_SOFT)
+        c.text(badge, x + w - badge_w - 16, y + 16, badge_w, 22, 11,
+               C.PRIMARY, False, gdi.ALIGN_CENTER)
+        c.text(block.get("description") or "", x + 18, y + 58, w - 36, 22,
+               12, C.TEXT_SUB)
+        c.text(block["status"], x + 18, y + 80, w - 36, 20, 12, C.TEXT_FAINT)
+        c.rect(x + 18, y + 108, w - 36, 1, C.DIVIDER)
+
+        list_y = y + 120
+        list_h = h - 132
+        bounds = (x, list_y, w, list_h)
+        self._list_rects["actions"] = bounds
+        buttons = block["buttons"]
+        sections = block.get("sections") or []
+        hotkeys = self.hotkey_rows(block["name"])
+        hk_h = (32 + len(hotkeys) * 44) if hotkeys else 0
+        guide_h = 118 if block["name"] == "窗口布局守护" else 0
+        row_step = BTN_H + BTN_GAP_Y
+        paired = bool(sections) and 1 < len(buttons) <= 3
+        button_rows = 1 if paired else len(buttons)
+        content_w = w - 32
+        section_items, section_h = self._layout_sections(c, content_w, sections)
+        section_gap = 8 if section_h else 0
+        gap_after = 12 if hk_h or guide_h or section_h else 0
+        total_h = (button_rows * row_step + section_gap + section_h
+                   + gap_after + hk_h + guide_h)
+        max_scroll = max(0, total_h - list_h)
+        self._action_scroll = min(max(0, self._action_scroll), max_scroll)
+
+        c.clip(x + 8, list_y, w - 16, list_h)
+        try:
+            button_top = list_y - self._action_scroll
+            if paired:
+                gap = 10
+                bw = (content_w - gap * (len(buttons) - 1)) // len(buttons)
+                for index, button in enumerate(buttons):
+                    rect = (x + 16 + index * (bw + gap), button_top, bw, BTN_H)
+                    if button_top + BTN_H < list_y or button_top > list_y + list_h:
+                        continue
+                    self._draw_button(c, button, rect)
+                    hit = self._clip_rect(rect, bounds)
+                    if hit:
+                        self._hotspots.append({
+                            "kind": "action", "rect": hit,
+                            "tool": block["name"], "action": button["id"],
+                        })
+            else:
+                for index, button in enumerate(buttons):
+                    by = button_top + index * row_step
+                    if by + BTN_H < list_y or by > list_y + list_h:
+                        continue
+                    rect = (x + 16, by, content_w, BTN_H)
+                    self._draw_button(c, button, rect)
+                    hit = self._clip_rect(rect, bounds)
+                    if hit:
+                        self._hotspots.append({
+                            "kind": "action", "rect": hit,
+                            "tool": block["name"], "action": button["id"],
+                        })
+            cursor = button_top + button_rows * row_step + section_gap
+            if section_items:
+                self._draw_section_items(
+                    c, x + 16, cursor, content_w, section_items, list_y, list_h)
+                cursor += section_h + gap_after
+            else:
+                cursor += gap_after
+            if hotkeys:
+                self._draw_hotkey_block(
+                    c, x + 16, cursor, content_w, hotkeys, bounds)
+                cursor += hk_h
+            if guide_h and cursor + guide_h >= list_y and cursor <= list_y + list_h:
+                self._draw_guide(c, x + 16, cursor, content_w, guide_h)
+        finally:
+            c.reset_clip()
+        self._draw_scrollbar(c, x + w - 8, list_y, list_h,
+                             self._action_scroll, max_scroll, list_h,
+                             max(1, total_h))
+
+    def _layout_sections(self, c, w: int, sections: list) -> tuple:
+        items = []
+        y = 0
+        label_w = 78
+        value_w = max(40, w - label_w - 8)
+        for section in sections:
+            items.append({
+                "type": "title", "y": y, "h": 28,
+                "text": section.get("title") or "",
+            })
+            y += 28
+            for row in section.get("rows") or []:
+                if row.get("kind") == "sub":
+                    items.append({
+                        "type": "sub", "y": y, "h": 26,
+                        "text": row.get("value") or "",
+                    })
+                    y += 26
+                    continue
+                lines = self._wrap_lines(
+                    c, row.get("value") or "—", 12, value_w) or ["—"]
+                height = max(26, 4 + 18 * len(lines))
+                items.append({
+                    "type": "field", "y": y, "h": height,
+                    "label": row.get("label") or "",
+                    "lines": lines,
+                })
+                y += height
+            y += 8
+        return items, y
+
+    def _draw_section_items(self, c, x, y, w, items, view_y, view_h) -> None:
+        label_w = 78
+        value_w = max(40, w - label_w - 8)
+        for item in items:
+            top = y + item["y"]
+            if top + item["h"] < view_y or top > view_y + view_h:
+                continue
+            kind = item["type"]
+            if kind == "title":
+                c.rounded(x, top + 6, 3, 14, 1, C.PRIMARY)
+                c.text(item["text"], x + 10, top, w - 10, 24, 13, C.TEXT, True)
+            elif kind == "sub":
+                c.text(item["text"], x, top, w, 24, 12.5, C.TEXT, True)
+            else:
+                c.text(item["label"], x, top, label_w, 22, 12, C.TEXT_FAINT)
+                line_y = top
+                for line in item["lines"]:
+                    c.text(line, x + label_w, line_y, value_w, 18, 12, C.TEXT,
+                           False, gdi.ALIGN_LEFT, gdi.VALIGN_MIDDLE, False)
+                    line_y += 18
+
+    def _draw_settings_page(self, c, x: int, y: int, w: int, h: int) -> None:
+        c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
+        c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
+        self._draw_icon_tile(c, "settings", x + 18, y + 16, 36, C.TEXT)
+        c.text("设置", x + 64, y + 14, w - 90, 24, 16, C.TEXT, True)
+        c.text("快捷方式固定在上方，快捷键按功能分开设置", x + 18, y + 58,
+               w - 36, 22, 12, C.TEXT_SUB)
+        c.rect(x + 18, y + 88, w - 36, 1, C.DIVIDER)
+
+        sec_y = y + 100
+        self._draw_shortcut_section(
+            c, x + 16, sec_y, w - 32, (x, sec_y, w, 96))
+        split_y = sec_y + 108
+        split_h = max(80, y + h - 16 - split_y)
+        self._draw_settings_hotkeys(c, x + 16, split_y, w - 32, split_h)
+
+    def _draw_shortcut_section(self, c, x, y, w, bounds) -> None:
+        exists = shortcut.shortcut_exists()
+        remembered = bool((self.config.get("shortcut") or {}).get("remember"))
+        state = "桌面已有快捷方式" if exists else "桌面还没有快捷方式"
+        if remembered:
+            state += "  ·  启动时不再询问"
+        else:
+            state += "  ·  下次启动会询问"
+        c.text("桌面快捷方式", x, y, w, 22, 13, C.TEXT, True)
+        c.text(state, x, y + 24, w, 20, 12, C.TEXT_SUB)
+        make = (x, y + 52, min(168, w // 2 - 6), 34)
+        ask = (make[0] + make[2] + 10, y + 52, min(168, w // 2 - 6), 34)
+        self._draw_mini_button(
+            c, "set_make", "", "更新快捷方式" if exists else "生成快捷方式",
+            make, bounds)
+        self._draw_mini_button(c, "set_ask", "", "重新询问", ask, bounds)
+
+    def _hotkey_groups(self) -> List[dict]:
+        groups = []
+        for index, block in enumerate(self._tool_blocks):
+            rows = self.hotkey_rows(block["name"])
+            if not rows:
+                continue
+            groups.append({
+                "name": block["name"],
+                "rows": rows,
+                "index": index,
+            })
+        names = {group["name"] for group in groups}
+        if groups and self._settings_hotkey_tool not in names:
+            self._settings_hotkey_tool = groups[0]["name"]
+        return groups
+
+    def _draw_settings_hotkeys(self, c, x, y, w, h) -> None:
+        """左边选功能，右边只显示该功能的快捷键，新增功能只增加一行。"""
+        groups = self._hotkey_groups()
+        nav_w = 168 if w >= 430 else 148
+        gap = 12
+        c.rounded(x, y, nav_w, h, 10, C.CARD_SOFT)
+        detail_x = x + nav_w + gap
+        detail_w = max(120, w - nav_w - gap)
+        c.rounded(detail_x, y, detail_w, h, 10, C.CARD, C.BORDER)
+        if not groups:
+            c.text("还没有可设置的快捷键", x + 12, y + 16, nav_w - 24, 28,
+                   12, C.TEXT_FAINT)
+            return
+
+        list_y = y + 8
+        list_h = h - 16
+        bounds = (x, list_y, nav_w, list_h)
+        self._list_rects["settings_nav"] = bounds
+        total_h = len(groups) * SETTINGS_TOOL_ROW
+        max_scroll = max(0, total_h - list_h)
+        self._settings_nav_scroll = min(
+            max(0, self._settings_nav_scroll), max_scroll)
+        palette = [C.PRIMARY, C.WARNING, C.SUCCESS]
+        c.clip(x + 4, list_y, nav_w - 8, list_h)
+        try:
+            for index, group in enumerate(groups):
+                ry = list_y + index * SETTINGS_TOOL_ROW - self._settings_nav_scroll
+                if ry + SETTINGS_TOOL_ROW < list_y or ry > list_y + list_h:
+                    continue
+                name = group["name"]
+                active = name == self._settings_hotkey_tool
+                hovered = self._hover == ("set_hk_tool", name)
+                row = (x + 6, ry + 2, nav_w - 16, SETTINGS_TOOL_ROW - 6)
+                accent = palette[group["index"] % len(palette)]
+                if active:
+                    c.rounded(row[0], row[1], row[2], row[3], 8, C.PRIMARY_SOFT)
+                    c.rounded(row[0], row[1] + 8, 3, row[3] - 16, 1, accent)
+                elif hovered:
+                    c.rounded(row[0], row[1], row[2], row[3], 8, C.CARD)
+                c.text(name, row[0] + 12, row[1], row[2] - 42, row[3], 12.5,
+                       C.TEXT, active)
+                count = str(len(group["rows"]))
+                c.text(count, row[0] + row[2] - 28, row[1], 22, row[3], 11,
+                       C.PRIMARY if active else C.TEXT_FAINT, False,
+                       gdi.ALIGN_CENTER)
+                hit = self._clip_rect(row, bounds)
+                if hit:
+                    self._hotspots.append({
+                        "kind": "set_hk_tool", "rect": hit, "tool": name,
+                    })
+        finally:
+            c.reset_clip()
+        self._draw_scrollbar(
+            c, x + nav_w - 8, list_y, list_h, self._settings_nav_scroll,
+            max_scroll, list_h, max(1, total_h))
+
+        selected = next(
+            (group for group in groups
+             if group["name"] == self._settings_hotkey_tool),
+            groups[0])
+        self._draw_settings_key_list(
+            c, detail_x + 12, y + 8, detail_w - 24, h - 16, selected)
+
+    def _draw_settings_key_list(self, c, x, y, w, h, group: dict) -> None:
+        name = group["name"]
+        rows = group["rows"]
+        c.text(name, x, y, w, 24, 14, C.TEXT, True)
+        c.text("改过之后，默认组合不再响应",
+               x, y + 24, w, 18, 11, C.TEXT_FAINT)
+        list_y = y + 50
+        list_h = max(36, h - 50)
+        bounds = (x, list_y, w, list_h)
+        self._list_rects["settings_keys"] = bounds
+        total_h = max(SETTINGS_KEY_ROW, len(rows) * SETTINGS_KEY_ROW)
+        max_scroll = max(0, total_h - list_h)
+        self._settings_scroll = min(max(0, self._settings_scroll), max_scroll)
+        c.clip(x, list_y, w, list_h)
+        try:
+            for index, row in enumerate(rows):
+                ry = list_y + index * SETTINGS_KEY_ROW - self._settings_scroll
+                if ry + SETTINGS_KEY_ROW < list_y or ry > list_y + list_h:
+                    continue
+                if index:
+                    c.rect(x, ry, w - 8, 1, C.DIVIDER)
+                c.text(row["title"], x, ry + 4, w - 8, 22, 13, C.TEXT, True)
+                self._draw_key_controls(c, x, ry + 28, w - 8, row, bounds)
+        finally:
+            c.reset_clip()
+        self._draw_scrollbar(
+            c, x + w - 4, list_y, list_h, self._settings_scroll, max_scroll,
+            list_h, total_h)
+
+    def _draw_key_controls(self, c, x, y, w, row, bounds) -> None:
+        reset_w = 64 if row["custom"] else 0
+        edit_w = 56
+        gap = 8
+        edit_x = x + w - edit_w - (gap + reset_w if reset_w else 0)
+        chip_w = max(88, int(c.measure(row["label"], 11.5) + 16))
+        chip_w = min(chip_w, max(72, edit_x - x - gap))
+        c.rounded(x, y, chip_w, 28, 8, C.PRIMARY_SOFT)
+        c.text(row["label"], x, y, chip_w, 28, 11.5, C.PRIMARY, True,
+               gdi.ALIGN_CENTER)
+        edit = (edit_x, y - 2, edit_w, 32)
+        self._draw_mini_button(c, "hk_edit", row["id"], "修改", edit, bounds)
+        if reset_w:
+            reset = (edit_x + edit_w + gap, y - 2, reset_w, 32)
+            self._draw_mini_button(
+                c, "hk_reset", row["id"], "默认", reset, bounds)
+
+    def _draw_hotkey_block(self, c, x, y, w, rows, bounds, heading=True) -> None:
+        offset = 0
+        if heading:
+            c.text("快捷键", x, y, w - 180, 24, 13, C.TEXT, True)
+            c.text("点「修改」后按下新组合，可恢复默认", x + w - 230, y, 230, 24,
+                   11, C.TEXT_FAINT, False, gdi.ALIGN_RIGHT)
+            offset = 30
+        for index, row in enumerate(rows):
+            ry = y + offset + index * 44
+            c.text(row["title"], x, ry, w * 0.38, 36, 12.5, C.TEXT, True)
+            reset_w = 64 if row["custom"] else 0
+            edit = (x + w - reset_w - (8 if reset_w else 0) - 56, ry + 2, 56, 32)
+            chip_w = max(88, int(c.measure(row["label"], 11.5) + 16))
+            chip_w = min(chip_w, max(88, edit[0] - x - int(w * 0.38) - 12))
+            chip_x = edit[0] - 8 - chip_w
+            c.rounded(chip_x, ry + 4, chip_w, 28, 8, C.PRIMARY_SOFT)
+            c.text(row["label"], chip_x, ry + 4, chip_w, 28, 11.5, C.PRIMARY,
+                   True, gdi.ALIGN_CENTER)
+            self._draw_mini_button(c, "hk_edit", row["id"], "修改", edit, bounds)
+            if reset_w:
+                reset = (edit[0] + edit[2] + 8, ry + 2, reset_w, 32)
+                self._draw_mini_button(
+                    c, "hk_reset", row["id"], "默认", reset, bounds)
+
+    def _draw_mini_button(self, c, kind, binding_id, label, rect, bounds) -> None:
+        key = kind if not binding_id else (kind, binding_id)
+        hovered = self._hover == key
+        pressed = self._pressed == key
+        x, y, w, h = rect
+        fill = C.PRIMARY_SOFT if hovered else C.CARD
+        border = C.PRIMARY if hovered else C.SCROLL
+        c.rounded(x, y + (1 if pressed else 0), w, h, 8, fill, border)
+        c.text(label, x, y + (1 if pressed else 0), w, h, 12, C.TEXT, False,
+               gdi.ALIGN_CENTER)
+        hit = self._clip_rect(rect, bounds)
+        if hit:
+            self._hotspots.append({
+                "kind": kind, "rect": hit, "id": binding_id,
+            })
+
+    def _draw_hotkey_dialog(self, c, w: int, h: int) -> None:
+        binding_id = self._dialog.get("id")
+        binding = self._bindings.get(binding_id) or {}
+        c.rect(0, 0, w, h, gdi.argb(15, 23, 42, 120))
+        dw, dh = 460, 268
+        dx = max(12, (w - dw) // 2)
+        dy = max(12, (h - dh) // 2)
+        c.rounded(dx + 4, dy + 8, dw, dh, 16, C.SHADOW)
+        c.rounded(dx, dy, dw, dh, 16, C.CARD, C.BORDER)
+        c.rounded(dx + 24, dy + 22, 44, 44, 12, C.PRIMARY_SOFT)
+        c.text("键", dx + 24, dy + 22, 44, 44, 20, C.PRIMARY, True,
+               gdi.ALIGN_CENTER)
+        c.text("设置快捷键", dx + 80, dy + 20, dw - 104, 26, 18, C.TEXT, True)
+        c.text(binding.get("title") or "", dx + 80, dy + 46, dw - 104, 20,
+               12, C.TEXT_SUB)
+        current = binding.get("label") or "未注册"
+        default = ""
+        if binding.get("defaults"):
+            default = format_hotkey(*binding["defaults"][0])
+        c.text("当前  %s" % current, dx + 26, dy + 84, dw - 52, 22, 13, C.TEXT)
+        c.text("默认  %s" % (default or "无"), dx + 26, dy + 108, dw - 52, 22,
+               12.5, C.TEXT_SUB)
+        c.text("直接按下新的组合键。需要同时包含 Ctrl、Alt 或 Win。",
+               dx + 26, dy + 140, dw - 52, 36, 12.5, C.TEXT_SUB, False,
+               gdi.ALIGN_LEFT, gdi.VALIGN_TOP, False)
+        custom = self._saved_hotkey(binding_id) is not None
+        if custom:
+            self._draw_dialog_button(
+                c, "dlg_hk_reset", "恢复默认", "default",
+                (dx + 24, dy + 196, 140, 46))
+            self._draw_dialog_button(
+                c, "dlg_hk_cancel", "取消", "primary",
+                (dx + 176, dy + 196, dw - 200, 46))
+        else:
+            self._draw_dialog_button(
+                c, "dlg_hk_cancel", "取消", "default",
+                (dx + 24, dy + 196, dw - 48, 46))
+
+    def _draw_guide(self, c, x: int, y: int, w: int, h: int) -> None:
+        c.text("快速上手", x, y, w, 22, 13, C.TEXT, True)
+        steps = [
+            "先点「保存当前布局」，记下窗口位置与大小",
+            "切换显示器模式后，布局会按比例自动还原",
+            "窗口伸出屏幕时，用救援把它拉回工作区",
+        ]
+        for index, step in enumerate(steps):
+            offset = y + 28 + index * 28
+            c.rounded(x, offset + 2, 20, 20, 10, C.PRIMARY_SOFT)
+            c.text(str(index + 1), x, offset + 2, 20, 20, 11, C.PRIMARY,
+                   True, gdi.ALIGN_CENTER)
+            c.text(step, x + 28, offset, w - 28, 24, 12, C.TEXT_SUB)
+
+    @staticmethod
+    def _compact_hint(hint: str) -> str:
+        if not hint:
+            return ""
+        if "快捷键" in hint:
+            key = hint.split("快捷键", 1)[1].split("；")[0].strip(" ：")
+            return "" if not key or "未注册" in key else key
+        if hint.startswith("切换 "):
+            key = hint.split("；")[0].replace("切换 ", "").strip()
+            return "" if not key or "未注册" in key else key
+        return hint.split("；")[0].strip()
 
     def _draw_button(self, c, button: dict, rect) -> None:
         x, y, w, h = rect
@@ -881,33 +1620,68 @@ class DesktopApp:
         pressed = self._pressed == key
         active = button.get("active", False)
         tone = button.get("tone", "default")
+        toggle = button.get("kind") == "toggle"
+        hint = self._compact_hint(button.get("hint", ""))
 
         if active:
-            fill = C.SUCCESS_SOFT
+            fill = gdi.argb(209, 250, 229) if (hovered or pressed) else C.SUCCESS_SOFT
             border = C.SUCCESS
             text = C.SUCCESS
+            hint_color = C.TEXT_SUB
             bold = True
         elif tone == "primary":
             fill = C.PRIMARY_DARK if pressed else (
-                C.PRIMARY if hovered else C.PRIMARY)
+                C.PRIMARY_HOVER if hovered else C.PRIMARY)
             border = None
             text = gdi.argb(255, 255, 255)
+            hint_color = gdi.argb(255, 255, 255, 210)
             bold = True
         elif tone == "warning":
-            fill = C.WARNING_SOFT if not hovered else gdi.argb(255, 255, 236, 205)
+            fill = gdi.argb(255, 237, 213) if hovered else C.WARNING_SOFT
             border = C.WARNING
             text = C.WARNING
+            hint_color = C.TEXT_SUB
             bold = True
         else:
             fill = C.PRIMARY_SOFT if hovered else C.CARD
-            border = C.BORDER
+            border = C.PRIMARY if hovered else C.SCROLL
             text = C.TEXT
+            hint_color = C.TEXT_SUB
             bold = False
         offset = 1 if pressed else 0
-        c.rounded(x + 1, y + 2, w - 2, h - 2, 9, C.SHADOW)
-        c.rounded(x, y + offset, w, h - 2, 9, fill, border)
-        c.text(button["label"], x + 10, y + offset, w - 20, h - 2, 13,
-               text, bold, gdi.ALIGN_CENTER)
+        radius = 10
+        c.rounded(x, y + 2, w, h - 2, radius, C.SHADOW)
+        c.rounded(x, y + offset, w, h - 2, radius, fill, border)
+
+        if toggle:
+            pill = "开" if active else "关"
+            pill_w = 32
+            c.text(button["label"], x + 12, y + offset + 3, w - pill_w - 28,
+                   22, 13, text, bold)
+            px = x + w - pill_w - 10
+            py = y + offset + 6
+            if active:
+                pill_fill = C.SUCCESS
+                pill_border = None
+                pill_text = gdi.argb(255, 255, 255)
+            else:
+                pill_fill = C.CARD_SOFT
+                pill_border = C.BORDER
+                pill_text = C.TEXT_SUB
+            c.rounded(px, py, pill_w, 20, 10, pill_fill, pill_border)
+            c.text(pill, px, py, pill_w, 20, 11, pill_text, True,
+                   gdi.ALIGN_CENTER)
+            if hint:
+                c.text(hint, x + 12, y + offset + 26, w - 24, 16, 10.5,
+                       hint_color)
+        elif hint:
+            c.text(button["label"], x + 8, y + offset + 3, w - 16, 22, 13,
+                   text, bold, gdi.ALIGN_CENTER)
+            c.text(hint, x + 8, y + offset + 25, w - 16, 16, 10.5,
+                   hint_color, False, gdi.ALIGN_CENTER)
+        else:
+            c.text(button["label"], x + 8, y + offset, w - 16, h - 2, 13,
+                   text, bold, gdi.ALIGN_CENTER)
 
     def _draw_lists(self, c, x: int, y: int, w: int, h: int) -> None:
         gap = 16
@@ -920,16 +1694,42 @@ class DesktopApp:
                              "当前窗口", self._window_lines, LIST_ROW_WINDOW,
                              self._window_scroll, "window")
 
+    def _draw_scrollbar(self, c, x, y, track_h, scroll, max_scroll,
+                        view_h, total_h) -> None:
+        if max_scroll <= 0 or track_h <= 8 or total_h <= 0:
+            return
+        c.rounded(x, y, 4, track_h, 2, C.DIVIDER)
+        thumb_h = max(28, int(track_h * min(1.0, view_h / total_h)))
+        thumb_h = min(thumb_h, track_h)
+        thumb_y = y + int((track_h - thumb_h) * scroll / max_scroll)
+        c.rounded(x, thumb_y, 4, thumb_h, 2, C.SCROLL)
+
     def _draw_list_card(self, c, x, y, w, h, title, lines, row_h,
                         scroll, which) -> None:
         accent = C.PRIMARY if which == "notice" else C.SUCCESS
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
         c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
-        c.rounded(x + 18, y + 13, 3, 20, 1, accent)
-        c.text(title, x + 30, y + 10, w - 48, 28, 14.5, C.TEXT, True)
-        c.rect(x + 18, y + 40, w - 36, 1, C.DIVIDER)
+        c.rounded(x + 16, y + 16, 3, 16, 1, accent)
+        c.text(title, x + 28, y + 8, w - 110, 28, 14, C.TEXT, True)
+
+        off_count = sum(1 for row in lines if row.get("off"))
+        if which == "window" and off_count:
+            badge = f"{off_count} 越界"
+            badge_fill, badge_border, badge_color = (
+                C.DANGER_SOFT, C.DANGER, C.DANGER)
+        else:
+            badge = str(len(lines)) if lines else "0"
+            badge_fill, badge_border, badge_color = (
+                C.CARD_SOFT, C.BORDER, C.TEXT_SUB)
+        badge_w = max(28, int(c.measure(badge, 11) + 16))
+        c.rounded(x + w - badge_w - 14, y + 12, badge_w, 22, 11,
+                  badge_fill, badge_border)
+        c.text(badge, x + w - badge_w - 14, y + 12, badge_w, 22, 11,
+               badge_color, which == "window" and off_count > 0, gdi.ALIGN_CENTER)
+
+        c.rect(x + 16, y + 42, w - 32, 1, C.DIVIDER)
         list_y = y + 48
-        list_h = h - 56
+        list_h = h - 58
         self._list_rects[which] = (x, list_y, w, list_h)
 
         visible = max(1, list_h // row_h)
@@ -942,24 +1742,135 @@ class DesktopApp:
 
         c.clip(x + 8, list_y, w - 16, list_h)
         try:
-            for index in range(scroll, min(len(lines), scroll + visible + 1)):
+            shown = range(scroll, min(len(lines), scroll + visible + 1))
+            for index in shown:
                 row_y = list_y + (index - scroll) * row_h
-                line = lines[index]
-                offscreen = line.startswith("[越界]")
-                if offscreen:
-                    c.rounded(x + 14, row_y + 4, 5, row_h - 8, 2, C.DANGER)
-                    color = C.DANGER
-                elif which == "notice" and " · " in line:
-                    color = C.TEXT_SUB
+                if index > scroll:
+                    c.rect(x + 16, row_y, w - 36, 1, C.DIVIDER)
+                row = lines[index]
+                if which == "notice":
+                    self._draw_notice_row(c, x, row_y, w, row_h, row)
                 else:
-                    color = C.TEXT
-                c.text(line, x + 26, row_y, w - 42, row_h, 12, color)
+                    self._draw_window_row(c, x, row_y, w, row_h, row)
         finally:
             c.reset_clip()
 
         if not lines:
-            c.text("暂无内容", x + 22, list_y, w - 44, 32, 12,
-                   C.TEXT_FAINT)
+            empty = "还没有通知" if which == "notice" else "没有可管理的窗口"
+            c.text(empty, x + 18, list_y + 8, w - 40, 28, 12, C.TEXT_FAINT)
+
+        self._draw_scrollbar(
+            c, x + w - 10, list_y, list_h - 4, scroll, max_scroll,
+            visible * row_h, max(1, len(lines)) * row_h)
+
+    def _draw_notice_row(self, c, x, y, w, h, row: dict) -> None:
+        title = row.get("title", "") or ""
+        message = row.get("message", "") or ""
+        title_w = max(1, w - 112)
+        message_w = max(1, w - 40)
+        truncated = (
+            c.measure(title, 12, True) > title_w
+            or c.measure(message, 11.5) > message_w
+        )
+        rect = (x + 8, y, max(1, w - 22), h)
+        self._notice_hits.append({
+            "rect": rect,
+            "truncated": truncated,
+            "time": row.get("time", ""),
+            "title": title,
+            "message": message,
+        })
+        px, py = self._pointer if self._pointer else (-1, -1)
+        rx, ry, rw, rh = rect
+        if (truncated and self._dialog is None
+                and rx <= px <= rx + rw and ry <= py <= ry + rh):
+            c.rounded(rx, ry + 2, rw, rh - 4, 8, C.CARD_SOFT)
+            self._pending_tip = {
+                "anchor": rect,
+                "time": row.get("time", ""),
+                "title": title,
+                "message": message,
+            }
+        c.text(row.get("time", ""), x + 16, y + 2, 72, 20, 11, C.TEXT_FAINT)
+        c.text(title, x + 88, y + 2, title_w, 20, 12, C.TEXT, True)
+        c.text(message, x + 16, y + 22, message_w, 18, 11.5, C.TEXT_SUB)
+
+    def _wrap_lines(self, c, text: str, size: float, width: float) -> List[str]:
+        text = " ".join((text or "").split())
+        if not text:
+            return []
+        if c.measure(text, size) <= width:
+            return [text]
+        lines: List[str] = []
+        current = ""
+        for ch in text:
+            trial = current + ch
+            if current and c.measure(trial, size) > width:
+                lines.append(current)
+                current = "" if ch == " " else ch
+            else:
+                current = trial
+        if current:
+            lines.append(current)
+        return lines
+
+    def _draw_notice_tip(self, c, w: int, h: int) -> None:
+        tip = self._pending_tip
+        if not tip or self._dialog is not None:
+            return
+        pad_x, pad_y = 14, 10
+        max_inner = min(400, max(180, w - 24 - pad_x * 2))
+        message_lines = self._wrap_lines(c, tip["message"], 12, max_inner)
+        title = tip["title"] or ""
+        when = tip["time"] or ""
+        head_w = c.measure(when, 11) + (8 if when and title else 0) + c.measure(
+            title, 12.5, True)
+        body_w = max((c.measure(line, 12) for line in message_lines), default=0)
+        inner = min(max_inner, max(160, head_w, body_w))
+        if body_w > inner:
+            message_lines = self._wrap_lines(c, tip["message"], 12, inner)
+        tip_w = int(inner + pad_x * 2)
+        tip_h = pad_y * 2 + 22 + max(1, len(message_lines)) * 20
+        ax, ay, aw, ah = tip["anchor"]
+        tx = ax
+        ty = ay + ah + 4
+        if ty + tip_h > h - 8:
+            ty = ay - tip_h - 4
+        if tx + tip_w > w - 8:
+            tx = w - 8 - tip_w
+        tx = max(8, tx)
+        ty = max(8, min(ty, h - tip_h - 8))
+        c.rounded(tx + 2, ty + 3, tip_w, tip_h, 10, C.SHADOW)
+        c.rounded(tx, ty, tip_w, tip_h, 10, C.CARD, C.PRIMARY)
+        cursor = tx + pad_x
+        if when:
+            time_w = int(c.measure(when, 11) + 8)
+            c.text(when, cursor, ty + pad_y, time_w, 22, 11, C.TEXT_FAINT)
+            cursor += time_w
+        c.text(title, cursor, ty + pad_y, tx + tip_w - pad_x - cursor, 22,
+               12.5, C.TEXT, True)
+        line_y = ty + pad_y + 22
+        for line in message_lines or [""]:
+            c.text(line, tx + pad_x, line_y, inner, 20, 12, C.TEXT_SUB,
+                   False, gdi.ALIGN_LEFT, gdi.VALIGN_MIDDLE, False)
+            line_y += 20
+
+    def _draw_window_row(self, c, x, y, w, h, row: dict) -> None:
+        off = bool(row.get("off"))
+        if off:
+            c.rounded(x + 10, y + 4, w - 28, h - 8, 8, C.DANGER_SOFT)
+        title_color = C.DANGER if off else C.TEXT
+        c.text(row.get("title", ""), x + 16, y + 3, w - 40, 22, 12.5,
+               title_color, True)
+        process = row.get("process") or ""
+        if off:
+            sub = "越界" + (f"  ·  {process}" if process else "")
+        else:
+            sub = process
+        meta = f"{row.get('pos', '')}    {row.get('size', '')}"
+        c.text(sub, x + 16, y + 24, int(w * 0.52), 18, 11, C.TEXT_FAINT)
+        c.text(meta, x + 16, y + 24, w - 40, 18, 11,
+               C.DANGER if off else C.TEXT_SUB, False, gdi.ALIGN_RIGHT)
 
     # -------------------------------------------------------- 交互处理 --
     def _hit_test(self, x: int, y: int, buttons_only: bool = False):
@@ -973,8 +1884,29 @@ class DesktopApp:
             if rx <= x <= rx + rw and ry <= y <= ry + rh:
                 if kind == "action":
                     return ("action", (spot["tool"], spot["action"]), spot)
+                if kind == "tool":
+                    return ("tool", spot["tool"], spot)
+                if kind in ("hk_edit", "hk_reset"):
+                    return (kind, (kind, spot["id"]), spot)
+                if kind in ("set_make", "set_ask"):
+                    return (kind, kind, spot)
+                if kind == "set_hk_tool":
+                    return (kind, ("set_hk_tool", spot["tool"]), spot)
                 if not buttons_only:
                     return (kind, kind, spot)
+        return None
+
+    def _notice_tip_key(self):
+        """当前指针下需要展开全文的通知；没有则返回 None。"""
+        if not self._pointer or self._dialog is not None:
+            return None
+        px, py = self._pointer
+        for index, hit in enumerate(self._notice_hits):
+            if not hit.get("truncated"):
+                continue
+            rx, ry, rw, rh = hit["rect"]
+            if rx <= px <= rx + rw and ry <= py <= ry + rh:
+                return index
         return None
 
     def _in_rect(self, x: int, y: int, which: str) -> bool:
@@ -1008,8 +1940,16 @@ class DesktopApp:
             self._notice_scroll = max(0, self._notice_scroll - delta)
         elif self._in_rect(x, y, "window"):
             self._window_scroll = max(0, self._window_scroll - delta)
-        elif self._in_rect(x, y, "tools"):
-            self._left_scroll = max(0, self._left_scroll - delta)
+        elif self._in_rect(x, y, "nav"):
+            self._nav_scroll = max(0, self._nav_scroll - delta * NAV_ROW)
+        elif self._in_rect(x, y, "actions"):
+            self._action_scroll = max(0, self._action_scroll - delta * (BTN_H + BTN_GAP_Y))
+        elif self._in_rect(x, y, "settings_nav"):
+            self._settings_nav_scroll = max(
+                0, self._settings_nav_scroll - delta * SETTINGS_TOOL_ROW)
+        elif self._in_rect(x, y, "settings_keys"):
+            self._settings_scroll = max(
+                0, self._settings_scroll - delta * SETTINGS_KEY_ROW)
         self._invalidate()
 
     @staticmethod
@@ -1104,10 +2044,23 @@ class DesktopApp:
 
             if msg == win32con.WM_MOUSEMOVE:
                 x, y = self._logical_pos(lparam)
+                if not self._tracking_leave:
+                    _track_mouse_leave(hwnd)
+                    self._tracking_leave = True
+                previous = self._notice_tip_key()
+                self._pointer = (x, y)
                 hit = self._hit_test(x, y)
                 new_hover = hit[1] if hit else None
-                if new_hover != self._hover:
+                if new_hover != self._hover or previous != self._notice_tip_key():
                     self._hover = new_hover
+                    self._invalidate()
+                return 0
+
+            if msg == WM_MOUSELEAVE:
+                self._tracking_leave = False
+                self._pointer = None
+                if self._hover is not None or self._pending_tip is not None:
+                    self._hover = None
                     self._invalidate()
                 return 0
 
@@ -1146,8 +2099,35 @@ class DesktopApp:
                         self._resolve_shortcut(True)
                     elif kind == "dlg_sc_skip":
                         self._resolve_shortcut(False)
-                    elif kind == "settings":
-                        self._show_settings_menu()
+                    elif kind == "dlg_hk_cancel":
+                        self._close_dialog()
+                    elif kind == "dlg_hk_reset":
+                        self.reset_hotkey(self._dialog.get("id"))
+                        self._close_dialog()
+                    elif kind == "hk_edit":
+                        self._dialog = {
+                            "kind": "hotkey", "id": spot["id"], "hotspots": [],
+                        }
+                        self._invalidate()
+                    elif kind == "hk_reset":
+                        self.reset_hotkey(spot["id"])
+                    elif kind in ("settings", "nav_settings"):
+                        self._open_settings()
+                    elif kind == "set_make":
+                        self._create_shortcut_action()
+                        self._invalidate()
+                    elif kind == "set_ask":
+                        self._reset_shortcut_prompt()
+                    elif kind == "set_hk_tool":
+                        if self._settings_hotkey_tool != spot["tool"]:
+                            self._settings_hotkey_tool = spot["tool"]
+                            self._settings_scroll = 0
+                        self._invalidate()
+                    elif kind == "tool":
+                        if self._selected_tool != spot["tool"]:
+                            self._selected_tool = spot["tool"]
+                            self._action_scroll = 0
+                        self._invalidate()
                     elif kind == "action":
                         threading.Thread(
                             target=self._run_action,
@@ -1201,6 +2181,14 @@ class DesktopApp:
                 self._clamp_scroll()
                 self._invalidate()
                 return 0
+
+            if msg in (win32con.WM_KEYDOWN, win32con.WM_SYSKEYDOWN):
+                if (self._dialog or {}).get("kind") == "hotkey":
+                    if int(wparam) == win32con.VK_ESCAPE:
+                        self._close_dialog()
+                    else:
+                        self._capture_hotkey(int(wparam))
+                    return 0
 
             if msg == win32con.WM_KEYDOWN and wparam == win32con.VK_ESCAPE:
                 if self._dialog is not None:

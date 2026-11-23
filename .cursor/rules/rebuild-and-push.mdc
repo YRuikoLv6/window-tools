@@ -1,0 +1,17 @@
+---
+description: 改完功能后重新打包 exe 并推送到 git
+alwaysApply: true
+---
+
+# 改完即打包并上传
+
+用户要求：每次改完程序行为后，都要生成新的 exe，并上传到 git。
+
+收尾时按这个顺序做：
+
+1. 用带 pywin32 的解释器打包：`python -m PyInstaller --clean --noconfirm WindowTools.spec`。当前可用解释器是 `C:\Users\PC\.codegeex\mamba\envs\codegeex-agent\python.exe`。产物是 `dist/WindowTools.exe`。
+2. 用新的 exe 和当前源码重打 `窗口工具集合-便携版.zip`：根目录放 `WindowTools.exe`，源码放在 `源码/` 下，结构与现有压缩包一致。
+3. 提交源码、exe 和便携包，并推送到 `origin`。提交说明用中文，写清这次为什么改。
+4. 不要提交 `data/`、日志、密钥，也不要改 git 配置。
+
+只改说明文字、且用户明确说先不打包时，可以不打包。

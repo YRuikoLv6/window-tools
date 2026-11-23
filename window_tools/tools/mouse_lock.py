@@ -18,6 +18,7 @@ import win32con
 
 from ..core.base_tool import BaseTool, MenuItem, WebAction
 from ..utils import winapi
+from ..utils.hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT
 
 Rect = Tuple[int, int, int, int]
 
@@ -63,18 +64,16 @@ class MouseLockTool(BaseTool):
     def on_load(self) -> None:
         # 进程正常退出路径（含未捕获异常）兜底释放裁剪区
         atexit.register(self._emergency_release)
-        ca = win32con.MOD_CONTROL | win32con.MOD_ALT
-        cs = win32con.MOD_CONTROL | win32con.MOD_SHIFT
-        cas = ca | win32con.MOD_SHIFT
-        self._toggle_hotkey_label = self._register_with_fallback(
-            "mouse.toggle", "L", self.toggle,
-            [(ca, "Ctrl+Alt+L"), (cs, "Ctrl+Shift+L"),
-             (cas, "Ctrl+Alt+Shift+L")],
+        ca = MOD_CONTROL | MOD_ALT
+        cs = MOD_CONTROL | MOD_SHIFT
+        cas = ca | MOD_SHIFT
+        self._toggle_hotkey_label = self.app.bind_hotkey(
+            "mouse.toggle", self.name, "锁定或解锁鼠标", self.toggle,
+            [(ca, ord("L")), (cs, ord("L")), (cas, ord("L"))],
         )
-        self._unlock_hotkey_label = self._register_with_fallback(
-            "mouse.unlock", "U", self.unlock,
-            [(ca, "Ctrl+Alt+U"), (cs, "Ctrl+Shift+U"),
-             (cas, "Ctrl+Alt+Shift+U")],
+        self._unlock_hotkey_label = self.app.bind_hotkey(
+            "mouse.unlock", self.name, "强制解锁鼠标", self.unlock,
+            [(ca, ord("U")), (cs, ord("U")), (cas, ord("U"))],
         )
         self._thread = threading.Thread(
             target=self._manager_loop, daemon=True, name="mouse-lock",
@@ -91,14 +90,6 @@ class MouseLockTool(BaseTool):
             self._toggle_hotkey_label or "未注册",
             self._unlock_hotkey_label or "未注册",
         )
-
-    def _register_with_fallback(self, key: str, letter: str, callback,
-                                combos: list) -> str:
-        for modifiers, label in combos:
-            if self.app.register_hotkey(key, modifiers, ord(letter), callback):
-                return label
-        self.log.warning("所有候选热键均被占用: %s", key)
-        return ""
 
     def on_unload(self) -> None:
         """退出时释放光标，并写回关闭状态，避免下次启动又自动锁定。"""
@@ -283,14 +274,15 @@ class MouseLockTool(BaseTool):
             index = self._monitor_index
         state = "已锁定" if enabled else "未锁定"
         target = f"屏幕 {index + 1}" if index >= 0 else "-"
-        switch = self._toggle_hotkey_label or "未注册"
-        unlock = self._unlock_hotkey_label or switch
+        switch = self.app.hotkey_label("mouse.toggle") or "未注册"
+        unlock = self.app.hotkey_label("mouse.unlock") or switch
         return f"鼠标 {state} · 目标 {target} · 切换 {switch} / 解锁 {unlock}"
 
     def get_web_actions(self) -> list:
-        hint = f"切换 {self._toggle_hotkey_label or '未注册'}"
-        if self._unlock_hotkey_label:
-            hint += f"；强制解锁 {self._unlock_hotkey_label}"
+        hint = "切换 %s" % (self.app.hotkey_label("mouse.toggle") or "未注册")
+        unlock = self.app.hotkey_label("mouse.unlock")
+        if unlock:
+            hint += "；强制解锁 %s" % unlock
         return [
             WebAction(
                 id="toggle_lock", label="锁定鼠标到当前屏幕", kind="toggle",

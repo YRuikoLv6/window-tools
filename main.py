@@ -19,6 +19,7 @@ from window_tools.core.desktop_app import DesktopApp, wake_existing_window
 from window_tools.core.tool_manager import ToolManager
 from window_tools.paths import CONFIG_PATH, ICON_PATH, LOG_DIR
 from window_tools.tools.mouse_lock import MouseLockTool
+from window_tools.tools.system_info import SystemInfoTool, collect_system_info
 from window_tools.tools.window_layout import WindowLayoutTool
 from window_tools.utils import winapi
 from window_tools.utils.config import JsonStore
@@ -60,8 +61,17 @@ def selftest(log) -> int:
     clamped = winapi.clamp_rect((-100, -50, 200, 200), (0, 0, 800, 600), 8)
     checks.append(("越界钳制", clamped[0] >= 8 and clamped[1] >= 8, str(clamped)))
 
+    from window_tools.utils.hotkeys import MOD_ALT, MOD_CONTROL, format_hotkey
+    label = format_hotkey(MOD_CONTROL | MOD_ALT, ord("S"))
+    checks.append(("快捷键文字", label == "Ctrl+Alt+S", label))
+
     ratio = winapi.visible_ratio((-500, 0, -100, 400), (0, 0, 1920, 1080))
     checks.append(("可见面积计算", ratio == 0.0, f"{ratio:.2f}"))
+    partial = winapi.is_offscreen((830, 189, 2013, 857), (0, 0, 1920, 1080))
+    maximized = winapi.is_offscreen((-8, -8, 1928, 1040), (0, 0, 1920, 1080))
+    inside = winapi.is_offscreen((100, 100, 900, 700), (0, 0, 1920, 1080))
+    checks.append(("越界判定", partial and not maximized and not inside,
+                   f"partial={partial} max={maximized} in={inside}"))
 
     client_hit = DesktopApp._nonclient_hit(400, 180, 800, 600)
     checks.append(("客户区鼠标命中", client_hit == win32con.HTCLIENT,
@@ -171,6 +181,26 @@ def selftest(log) -> int:
     )
     checks.append(("单实例唤醒协议", wake_protocol_ok, app_module.WINDOW_CLASS))
 
+    snapshot = collect_system_info()
+    titles = [section["title"] for section in snapshot["sections"]]
+    labels = {
+        row.get("label")
+        for section in snapshot["sections"]
+        for row in section["rows"]
+    }
+    model = ""
+    for section in snapshot["sections"]:
+        for row in section["rows"]:
+            if row.get("label") == "电脑型号":
+                model = row.get("value") or ""
+    info_ok = (
+        titles == ["系统", "硬件", "网络"]
+        and "外网 IP" in labels
+        and bool(model)
+        and model != "未读取到"
+    )
+    checks.append(("本机信息", info_ok, model or "空"))
+
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:
         log.info("%s %s - %s", "PASS" if passed else "FAIL", name, detail)
@@ -193,6 +223,7 @@ def main() -> int:
         "general": {"auto_detect": True},
         "mouse": {"enabled": False},
         "shortcut": {"asked": False, "remember": False, "create": False},
+        "hotkeys": {},
     })
 
     if args.selftest:
@@ -211,6 +242,7 @@ def main() -> int:
     manager = ToolManager(app)
     manager.register(WindowLayoutTool)
     manager.register(MouseLockTool)
+    manager.register(SystemInfoTool)
     app.set_manager(manager)
     app.run()
     return 0

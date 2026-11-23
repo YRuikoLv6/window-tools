@@ -64,6 +64,13 @@ _set_clip = _api("GdipSetClipRect", [P, ctypes.c_float, ctypes.c_float,
 _reset_clip = _api("GdipResetClip", [P])
 _fill_path = _api("GdipFillPath", [P, P, P])
 _draw_path = _api("GdipDrawPath", [P, P, P])
+_add_line = _api("GdipAddPathLine", [P, ctypes.c_float, ctypes.c_float,
+                                    ctypes.c_float, ctypes.c_float])
+_draw_line = _api("GdipDrawLine", [P, P, ctypes.c_float, ctypes.c_float,
+                                  ctypes.c_float, ctypes.c_float])
+_pen_start = _api("GdipSetPenStartCap", [P, ctypes.c_int])
+_pen_end = _api("GdipSetPenEndCap", [P, ctypes.c_int])
+_pen_join = _api("GdipSetPenLineJoin", [P, ctypes.c_int])
 
 _fill_rect = _api("GdipFillRectangle", [P, P, ctypes.c_float, ctypes.c_float,
                                         ctypes.c_float, ctypes.c_float])
@@ -140,27 +147,31 @@ def argb(red: int, green: int, blue: int, alpha: int = 255) -> int:
 
 
 class C:
-    """主题配色（亮色、克制的高饱和点缀）。"""
-    BG = argb(244, 246, 250)
+    """主题配色：冷灰底、白卡片、单一主色，状态色只用于语义。"""
+    BG = argb(241, 245, 249)
     CARD = argb(255, 255, 255)
-    CARD_SOFT = argb(249, 250, 253)
+    CARD_SOFT = argb(248, 250, 252)
     BORDER = argb(226, 232, 240)
-    SHADOW = argb(20, 30, 54, 22)
-    TEXT = argb(26, 35, 53)
-    TEXT_SUB = argb(100, 112, 133)
-    TEXT_FAINT = argb(152, 162, 179)
-    PRIMARY = argb(54, 105, 233)
-    PRIMARY_DARK = argb(40, 84, 196)
-    PRIMARY_SOFT = argb(235, 242, 255)
-    SUCCESS = argb(16, 168, 106)
-    SUCCESS_SOFT = argb(228, 249, 239)
-    WARNING = argb(232, 145, 31)
-    WARNING_SOFT = argb(255, 245, 229)
-    DANGER = argb(226, 67, 67)
-    DANGER_SOFT = argb(255, 236, 236)
-    DIVIDER = argb(238, 242, 248)
-    HEADER_A = argb(28, 50, 92)
-    HEADER_B = argb(46, 82, 152)
+    SHADOW = argb(15, 23, 42, 28)
+    TEXT = argb(15, 23, 42)
+    TEXT_SUB = argb(71, 85, 105)
+    TEXT_FAINT = argb(148, 163, 184)
+    PRIMARY = argb(37, 99, 235)
+    PRIMARY_HOVER = argb(59, 130, 246)
+    PRIMARY_DARK = argb(29, 78, 216)
+    PRIMARY_SOFT = argb(239, 246, 255)
+    SUCCESS = argb(5, 150, 105)
+    SUCCESS_SOFT = argb(236, 253, 245)
+    WARNING = argb(180, 83, 9)
+    WARNING_SOFT = argb(255, 247, 237)
+    DANGER = argb(220, 38, 38)
+    DANGER_DARK = argb(185, 28, 28)
+    DANGER_SOFT = argb(254, 242, 242)
+    DIVIDER = argb(226, 232, 240)
+    SCROLL = argb(203, 213, 225)
+    HEADER_A = argb(15, 23, 42)
+    HEADER_B = argb(30, 58, 138)
+    HEADER_LINE = argb(96, 165, 250)
 
 
 ALIGN_LEFT = 0
@@ -302,6 +313,60 @@ class Canvas:
                            ctypes.byref(pen)) == 0:
                 _draw_path(self.graphics, pen, path)
                 _delete_pen(pen)
+        _delete_path(path)
+
+    def _pen(self, color: int, width: float):
+        pen = P()
+        if _create_pen(color, self._s(width), 0, ctypes.byref(pen)) != 0:
+            return None
+        _pen_start(pen, 2)
+        _pen_end(pen, 2)
+        _pen_join(pen, 2)
+        return pen
+
+    def line(self, x1, y1, x2, y2, color: int, width: float = 1.6) -> None:
+        pen = self._pen(color, width)
+        if pen is None:
+            return
+        _draw_line(self.graphics, pen, self._s(x1), self._s(y1),
+                   self._s(x2), self._s(y2))
+        _delete_pen(pen)
+
+    def stroke_rounded(self, x, y, w, h, radius: float, color: int,
+                       width: float = 1.5) -> None:
+        if w <= 0 or h <= 0:
+            return
+        x, y, w, h = self._s(x), self._s(y), self._s(w), self._s(h)
+        radius = max(0.0, min(self._s(radius), min(w, h) / 2.0))
+        path = P()
+        if _create_path(0, ctypes.byref(path)) != 0:
+            return
+        d = radius * 2
+        _add_arc(path, x, y, d, d, 180, 90)
+        _add_arc(path, x + w - d, y, d, d, 270, 90)
+        _add_arc(path, x + w - d, y + h - d, d, d, 0, 90)
+        _add_arc(path, x, y + h - d, d, d, 90, 90)
+        _close_figure(path)
+        pen = self._pen(color, width)
+        if pen is not None:
+            _draw_path(self.graphics, pen, path)
+            _delete_pen(pen)
+        _delete_path(path)
+
+    def polygon(self, points, color: int) -> None:
+        if len(points) < 3:
+            return
+        path = P()
+        if _create_path(0, ctypes.byref(path)) != 0:
+            return
+        x0, y0 = points[0]
+        for x, y in points[1:]:
+            _add_line(path, self._s(x0), self._s(y0), self._s(x), self._s(y))
+            x0, y0 = x, y
+        _add_line(path, self._s(x0), self._s(y0),
+                  self._s(points[0][0]), self._s(points[0][1]))
+        _close_figure(path)
+        _fill_path(self.graphics, P(self._brush(color)), path)
         _delete_path(path)
 
     def clip(self, x, y, w, h) -> None:

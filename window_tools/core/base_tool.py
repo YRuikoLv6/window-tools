@@ -29,6 +29,7 @@ class BaseTool:
     name = "未命名工具"
     description = ""
     version = "1.0.0"
+    nav_pinned = False
 
     def __init__(self, app):
         self.app = app
