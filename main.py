@@ -142,7 +142,8 @@ def selftest(log) -> int:
         lnk = os.path.join(folder, "test.lnk")
         made = sc_module.create_shortcut(lnk)
         valid = (made.get("ok") and os.path.isfile(lnk)
-                 and open(lnk, "rb").read(4) == b"\x4c\x00\x00\x00")
+                 and open(lnk, "rb").read(4) == b"\x4c\x00\x00\x00"
+                 and sc_module.shortcut_is_current(lnk))
         checks.append(("快捷方式生成", bool(valid), "OK"))
 
     # 关闭确认框：出现时屏蔽背景点击，消失后恢复普通热点

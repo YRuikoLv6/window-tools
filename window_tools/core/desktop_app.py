@@ -558,11 +558,36 @@ class DesktopApp:
             win32gui.DestroyWindow(self.hwnd)
 
     # -------------------------------------------- 桌面快捷方式询问/设置 --
+    def _shortcut_status(self) -> tuple[bool, bool]:
+        """返回 (文件存在, 指向当前程序)。短时间缓存，避免每次重绘都读快捷方式。"""
+        now = time.time()
+        cached = getattr(self, "_shortcut_cache", None)
+        if cached and now - cached[0] < 2:
+            return cached[1], cached[2]
+        exists = shortcut.shortcut_exists()
+        current = shortcut.shortcut_is_current() if exists else False
+        self._shortcut_cache = (now, exists, current)
+        return exists, current
+
+    def _should_ask_shortcut(self) -> bool:
+        """已有指向当前程序的快捷方式时不再询问；设置里点过「重新询问」则再问一次。"""
+        sc = self.config.get("shortcut", {}) or {}
+        if sc.get("force_ask"):
+            return True
+        _exists, current = self._shortcut_status()
+        if current:
+            return False
+        if sc.get("asked") and sc.get("remember"):
+            return False
+        return True
+
     def _maybe_ask_shortcut(self) -> None:
         """启动后按需询问是否创建桌面快捷方式。"""
-        sc = self.config.get("shortcut", {}) or {}
-        if sc.get("asked") and sc.get("remember"):
-            return  # 用户已选择“保持选择”，不再询问
+        if not self._should_ask_shortcut():
+            _exists, current = self._shortcut_status()
+            if current:
+                self.log.info("桌面快捷方式已指向当前程序，跳过询问")
+            return
         if self._dialog is not None:
             return
         self._dialog = {"kind": "shortcut", "hotspots": [], "keep": False}
@@ -577,6 +602,7 @@ class DesktopApp:
         sc["asked"] = True
         sc["create"] = bool(create)
         sc["remember"] = keep
+        sc["force_ask"] = False
         self.config.data["shortcut"] = sc
         self.config.save()
         self._close_dialog()
@@ -595,6 +621,7 @@ class DesktopApp:
             result = {"ok": False, "message": "生成失败：%s" % exc}
         level = self.log.info if result.get("ok") else self.log.warning
         level("桌面快捷方式：%s", result.get("message"))
+        self._shortcut_cache = None
         self.notify(result.get("message", "快捷方式操作完成"))
 
     def _open_settings(self) -> None:
@@ -610,6 +637,7 @@ class DesktopApp:
         sc = dict(self.config.get("shortcut", {}) or {})
         sc["asked"] = False
         sc["remember"] = False
+        sc["force_ask"] = True
         self.config.data["shortcut"] = sc
         self.config.save()
         self.notify("下次启动将重新询问是否创建桌面快捷方式")
@@ -1368,13 +1396,17 @@ class DesktopApp:
         self._draw_settings_hotkeys(c, x + 16, split_y, w - 32, split_h)
 
     def _draw_shortcut_section(self, c, x, y, w, bounds) -> None:
-        exists = shortcut.shortcut_exists()
-        remembered = bool((self.config.get("shortcut") or {}).get("remember"))
-        state = "桌面已有快捷方式" if exists else "桌面还没有快捷方式"
-        if remembered:
-            state += "  ·  启动时不再询问"
+        exists, current = self._shortcut_status()
+        if current:
+            state = "桌面快捷方式已指向当前程序"
+        elif exists:
+            state = "桌面快捷方式未指向当前程序"
         else:
+            state = "桌面还没有快捷方式"
+        if self._should_ask_shortcut():
             state += "  ·  下次启动会询问"
+        else:
+            state += "  ·  启动时不再询问"
         c.text("桌面快捷方式", x, y, w, 22, 13, C.TEXT, True)
         c.text(state, x, y + 24, w, 20, 12, C.TEXT_SUB)
         make = (x, y + 52, min(168, w // 2 - 6), 34)

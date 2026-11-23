@@ -44,6 +44,33 @@ def shortcut_exists() -> bool:
     return os.path.isfile(shortcut_path())
 
 
+def _same_path(left: str, right: str) -> bool:
+    left = (left or "").strip().strip('"')
+    right = (right or "").strip().strip('"')
+    if not left or not right:
+        return False
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
+        os.path.normpath(right))
+
+
+def shortcut_is_current(path: str | None = None) -> bool:
+    """桌面快捷方式已存在，且目标就是当前这次运行的程序。"""
+    target_path = path or shortcut_path()
+    if not os.path.isfile(target_path):
+        return False
+    try:
+        import win32com.client
+        link = win32com.client.Dispatch("WScript.Shell").CreateShortcut(target_path)
+        spec = launch_spec()
+        if not _same_path(link.TargetPath, spec["target"]):
+            return False
+        if spec["arguments"] and not _same_path(link.Arguments, spec["arguments"]):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def launch_spec() -> dict:
     """返回当前程序的启动参数：目标、命令行、工作目录、图标、描述。"""
     if FROZEN:
