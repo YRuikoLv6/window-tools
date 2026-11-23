@@ -9,9 +9,9 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 APP_DIR_NAME = "窗口工具集合"
-_CREATE_NO_WINDOW = 0x08000000
 
 
 def directory_needs_own_folder(folder: str, exe_name: str) -> bool:
@@ -45,8 +45,35 @@ def pick_app_folder(parent: str) -> str:
     return os.path.join(parent, "%s 100" % APP_DIR_NAME)
 
 
+def remove_original_exe(path: str, current_exe: str) -> bool:
+    """删除搬迁前的程序文件。只删这个 exe，不会动旁边的其他文件。"""
+    if not path:
+        return False
+    path = os.path.abspath(path)
+    current = os.path.abspath(current_exe)
+    if os.path.normcase(path) == os.path.normcase(current):
+        return False
+    if os.path.basename(path).lower() != os.path.basename(current).lower():
+        return False
+    if not os.path.exists(path):
+        return True
+    if not os.path.isfile(path):
+        return False
+    for attempt in range(20):
+        try:
+            os.remove(path)
+        except OSError:
+            time.sleep(0.25)
+            continue
+        if not os.path.exists(path):
+            return True
+        if attempt < 19:
+            time.sleep(0.25)
+    return not os.path.exists(path)
+
+
 def relocate_frozen_exe() -> None:
-    """需要挪动时复制到新文件夹、启动新进程，并在退出后删除原来的 exe。"""
+    """需要挪动时复制到新文件夹并启动新进程。原来的文件由新进程删除。"""
     if not getattr(sys, "frozen", False):
         return
     if "--selftest" in sys.argv:
@@ -62,11 +89,7 @@ def relocate_frozen_exe() -> None:
         shutil.copy2(exe, dest_exe)
     except OSError:
         return
-    subprocess.Popen([dest_exe, "--relocated"], cwd=dest_dir, close_fds=True)
     subprocess.Popen(
-        ["cmd", "/c", 'ping 127.0.0.1 -n 4 >nul & del /f /q "%s"' % exe],
-        creationflags=_CREATE_NO_WINDOW,
-        close_fds=True,
-        cwd=os.environ.get("TEMP") or folder,
+        [dest_exe, "--relocated", exe], cwd=dest_dir, close_fds=True,
     )
     os._exit(0)

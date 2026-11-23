@@ -479,7 +479,10 @@ class DesktopApp:
         _set_timer(self.hwnd, TIMER_REFRESH, REFRESH_MS)
         self.log.info("原生自绘窗体已创建 (hwnd=%s)", self.hwnd)
         self.notify("窗体已启动，工具按钮已就绪")
-        self._maybe_ask_shortcut()
+        if getattr(self, "_relocate_info", None):
+            self._show_relocate_dialog()
+        else:
+            self._maybe_ask_shortcut()
 
         try:
             win32gui.PumpMessages()
@@ -580,6 +583,35 @@ class DesktopApp:
         if sc.get("asked") and sc.get("remember"):
             return False
         return True
+
+    def prepare_relocate_notice(self, folder: str, original: str,
+                                removed: bool) -> None:
+        """记录本次启动是从杂乱目录搬过来的，窗口打开后再提示。"""
+        self._relocate_info = {
+            "folder": folder,
+            "original": original,
+            "removed": bool(removed),
+        }
+
+    def _show_relocate_dialog(self) -> None:
+        info = getattr(self, "_relocate_info", None) or {}
+        self._dialog = {
+            "kind": "relocate",
+            "hotspots": [],
+            "folder": info.get("folder") or "",
+            "original": info.get("original") or "",
+            "removed": bool(info.get("removed")),
+        }
+        self._invalidate()
+        self.log.info(
+            "启动提示：程序已移动，原文件%s",
+            "已删除" if info.get("removed") else "未能删除",
+        )
+
+    def _dismiss_relocate(self) -> None:
+        self._relocate_info = None
+        self._close_dialog()
+        self._maybe_ask_shortcut()
 
     def _maybe_ask_shortcut(self) -> None:
         """启动后按需询问是否创建桌面快捷方式。"""
@@ -873,6 +905,8 @@ class DesktopApp:
             kind = self._dialog.get("kind")
             if kind == "shortcut":
                 self._draw_shortcut_dialog(c, w, h)
+            elif kind == "relocate":
+                self._draw_relocate_dialog(c, w, h)
             elif kind == "hotkey":
                 self._draw_hotkey_dialog(c, w, h)
             else:
@@ -966,6 +1000,40 @@ class DesktopApp:
         c.text(label, x, y + offset, bw, bh - 2, 13, color, bold,
                gdi.ALIGN_CENTER)
         self._hotspots.append({"kind": kind, "rect": rect})
+
+    def _draw_relocate_dialog(self, c, w: int, h: int) -> None:
+        """搬到独立文件夹后，打开时说明新位置，并告知原文件是否已删除。"""
+        c.rect(0, 0, w, h, gdi.argb(15, 23, 42, 120))
+        dw, dh = 520, 280
+        dx = max(12, (w - dw) // 2)
+        dy = max(12, (h - dh) // 2)
+        c.rounded(dx + 4, dy + 8, dw, dh, 16, C.SHADOW)
+        c.rounded(dx, dy, dw, dh, 16, C.CARD, C.BORDER)
+
+        c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
+        c.text("移", dx + 24, dy + 24, 44, 44, 20, C.PRIMARY, True,
+               gdi.ALIGN_CENTER)
+        c.text("程序已放到单独文件夹", dx + 80, dy + 22, dw - 104, 30, 18,
+               C.TEXT, True)
+        c.text("原来的位置里还有其他文件，所以没有留在那里。",
+               dx + 26, dy + 78, dw - 52, 24, 13, C.TEXT_SUB)
+        folder = (self._dialog or {}).get("folder") or ""
+        c.text(folder, dx + 26, dy + 108, dw - 52, 24, 12.5, C.TEXT, True,
+               ellipsis=True)
+        if (self._dialog or {}).get("removed"):
+            result = "原来的程序文件已删除。旁边的其他文件没有改动。"
+            color = C.TEXT_SUB
+        else:
+            original = (self._dialog or {}).get("original") or "未知位置"
+            result = "原来的程序文件还在，请手动删除：%s" % original
+            color = C.DANGER
+        c.text(result, dx + 26, dy + 140, dw - 52, 40, 12.5, color,
+               ellipsis=True)
+
+        c.rect(dx + 24, dy + 190, dw - 48, 1, C.DIVIDER)
+        self._draw_dialog_button(
+            c, "dlg_relocate_ok", "知道了", "primary",
+            (dx + 24, dy + 210, dw - 48, 46))
 
     def _draw_shortcut_dialog(self, c, w: int, h: int) -> None:
         """启动询问框：是否创建桌面快捷方式 + 保持选择勾选。"""
@@ -2131,6 +2199,8 @@ class DesktopApp:
                         self._resolve_shortcut(True)
                     elif kind == "dlg_sc_skip":
                         self._resolve_shortcut(False)
+                    elif kind == "dlg_relocate_ok":
+                        self._dismiss_relocate()
                     elif kind == "dlg_hk_cancel":
                         self._close_dialog()
                     elif kind == "dlg_hk_reset":
@@ -2223,6 +2293,9 @@ class DesktopApp:
                     return 0
 
             if msg == win32con.WM_KEYDOWN and wparam == win32con.VK_ESCAPE:
+                if (self._dialog or {}).get("kind") == "relocate":
+                    self._dismiss_relocate()
+                    return 0
                 if self._dialog is not None:
                     self._close_dialog()
                     return 0

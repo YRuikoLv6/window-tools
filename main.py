@@ -28,7 +28,11 @@ from window_tools.tools.mouse_lock import MouseLockTool
 from window_tools.tools.system_info import SystemInfoTool, collect_system_info
 from window_tools.tools.window_layout import WindowLayoutTool
 from window_tools.utils import winapi
-from window_tools.utils.relocate import directory_needs_own_folder, pick_app_folder
+from window_tools.utils.relocate import (
+    directory_needs_own_folder,
+    pick_app_folder,
+    remove_original_exe,
+)
 from window_tools.utils.config import JsonStore
 from window_tools.utils.logger import setup_logger
 
@@ -219,6 +223,14 @@ def selftest(log) -> int:
         used = not directory_needs_own_folder(folder, exe_name)
         picked = os.path.basename(pick_app_folder(folder))
         relocate_ok = alone and crowded and used and picked == "窗口工具集合"
+        old_exe = os.path.join(folder, exe_name)
+        current_exe = os.path.join(folder, "窗口工具集合", exe_name)
+        removed = remove_original_exe(old_exe, current_exe)
+        note = os.path.join(folder, "说明.txt")
+        kept_note = os.path.isfile(note)
+        refused = not remove_original_exe(note, current_exe)
+        relocate_ok = relocate_ok and removed and kept_note and refused
+        relocate_ok = relocate_ok and not os.path.exists(old_exe)
         checks.append(("首次启动独立文件夹", relocate_ok, picked))
 
     failed = [name for name, passed, _ in checks if not passed]
@@ -236,7 +248,9 @@ def selftest(log) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="窗口工具集合（原生桌面窗体）")
     parser.add_argument("--selftest", action="store_true", help="运行核心自检后退出")
-    parser.add_argument("--relocated", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--relocated", nargs="?", const="", default=None, help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
     log = setup_logger(LOG_DIR)
@@ -260,11 +274,18 @@ def main() -> int:
 
     log.info("窗口工具集合 v%s 启动中", __version__)
     app = DesktopApp(log, config)
-    if args.relocated:
-        app.notify(
-            "已将程序放到单独文件夹：%s" % os.path.dirname(sys.executable),
-            "窗口工具集合",
-        )
+    if args.relocated is not None:
+        folder = os.path.dirname(os.path.abspath(sys.executable))
+        removed = remove_original_exe(args.relocated, sys.executable)
+        if removed:
+            message = "已删除原来的程序文件，并放到：%s" % folder
+        else:
+            message = "程序已放到：%s。原来的文件还在：%s" % (
+                folder, args.relocated or "未知位置",
+            )
+        log.info(message)
+        app.notify(message, "程序已移动")
+        app.prepare_relocate_notice(folder, args.relocated or "", removed)
     manager = ToolManager(app)
     manager.register(WindowLayoutTool)
     manager.register(MouseLockTool)
