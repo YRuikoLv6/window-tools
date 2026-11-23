@@ -1013,19 +1013,19 @@ class DesktopApp:
         c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
         c.text("移", dx + 24, dy + 24, 44, 44, 20, C.PRIMARY, True,
                gdi.ALIGN_CENTER)
-        c.text("程序已放到单独文件夹", dx + 80, dy + 22, dw - 104, 30, 18,
+        c.text("程序已移动", dx + 80, dy + 22, dw - 104, 30, 18,
                C.TEXT, True)
-        c.text("原来的位置里还有其他文件，所以没有留在那里。",
+        c.text("所在目录还有其他文件，已移到下面的文件夹。",
                dx + 26, dy + 78, dw - 52, 24, 13, C.TEXT_SUB)
         folder = (self._dialog or {}).get("folder") or ""
         c.text(folder, dx + 26, dy + 108, dw - 52, 24, 12.5, C.TEXT, True,
                ellipsis=True)
         if (self._dialog or {}).get("removed"):
-            result = "原来的程序文件已删除。旁边的其他文件没有改动。"
+            result = "原来的程序已删除。"
             color = C.TEXT_SUB
         else:
             original = (self._dialog or {}).get("original") or "未知位置"
-            result = "原来的程序文件还在，请手动删除：%s" % original
+            result = "原来的程序还在，请手动删除：%s" % original
             color = C.DANGER
         c.text(result, dx + 26, dy + 140, dw - 52, 40, 12.5, color,
                ellipsis=True)

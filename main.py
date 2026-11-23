@@ -278,9 +278,9 @@ def main() -> int:
         folder = os.path.dirname(os.path.abspath(sys.executable))
         removed = remove_original_exe(args.relocated, sys.executable)
         if removed:
-            message = "已删除原来的程序文件，并放到：%s" % folder
+            message = "程序已移到 %s，原来的文件已删除" % folder
         else:
-            message = "程序已放到：%s。原来的文件还在：%s" % (
+            message = "程序已移到 %s。原来的文件还在，请手动删除：%s" % (
                 folder, args.relocated or "未知位置",
             )
         log.info(message)
