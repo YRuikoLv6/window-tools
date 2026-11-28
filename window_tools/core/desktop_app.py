@@ -30,7 +30,7 @@ from ..ui.tray import (
     TRAY_EXIT, TRAY_HIDE, TRAY_MOUSE_TOGGLE, TRAY_RESCUE, TRAY_SHOW,
     TrayIcon, TrayMenu, WM_TRAYICON,
 )
-from ..utils import shortcut, winapi
+from ..utils import autostart, shortcut, winapi
 from ..utils.hotkeys import (
     MOD_NOREPEAT, format_hotkey, is_modifier_vk, pressed_modifiers,
     reject_reason,
@@ -682,6 +682,7 @@ class DesktopApp:
             _exists, current = self._shortcut_status()
             if current:
                 self.log.info("桌面快捷方式已指向当前程序，跳过询问")
+            self._maybe_ask_autostart()
             return
         if self._dialog is not None:
             return
@@ -706,6 +707,76 @@ class DesktopApp:
             self._create_shortcut_action()
         if keep:
             self.notify("已记住选择，以后不再询问")
+        self._maybe_ask_autostart()  # 询问链：快捷方式 -> 开机自启
+
+    # ---------------------------------------------- 开机自启询问/设置 --
+    def _should_ask_autostart(self) -> bool:
+        """已记住选择、或自启项已指向当前程序时不再询问。"""
+        cfg = self.config.get("autostart", {}) or {}
+        if cfg.get("force_ask"):
+            return True
+        enabled, current = autostart.status()
+        if enabled and current:
+            return False
+        if cfg.get("asked") and cfg.get("remember"):
+            return False
+        return True
+
+    def _maybe_ask_autostart(self) -> None:
+        """快捷方式询问结束后接着询问是否开机自启。"""
+        if self._dialog is not None or not self._should_ask_autostart():
+            return
+        self._dialog = {"kind": "autostart", "hotspots": [], "keep": False}
+        self._invalidate()
+        self.log.info("启动询问：是否开启开机自启")
+
+    def _resolve_autostart(self, enable: bool) -> None:
+        """处理自启询问结果，并按勾选状态持久化选择。"""
+        dialog = self._dialog or {}
+        keep = bool(dialog.get("keep", False))
+        cfg = dict(self.config.get("autostart", {}) or {})
+        cfg["asked"] = True
+        cfg["enabled"] = bool(enable)
+        cfg["remember"] = keep
+        cfg["force_ask"] = False
+        self.config.data["autostart"] = cfg
+        self.config.save()
+        self._close_dialog()
+        self._apply_autostart_state(enable)
+        if keep:
+            self.notify("已记住选择，以后不再询问")
+        self.log.info("开机自启选择：enable=%s remember=%s", enable, keep)
+
+    def _apply_autostart(self, enable: bool) -> None:
+        """设置页手动开关：与首次询问共用同一套写入与反馈。"""
+        cfg = dict(self.config.get("autostart", {}) or {})
+        cfg["asked"] = True
+        cfg["enabled"] = bool(enable)
+        cfg["force_ask"] = False
+        self.config.data["autostart"] = cfg
+        self.config.save()
+        self._apply_autostart_state(enable)
+        self._invalidate()
+
+    def _apply_autostart_state(self, enable: bool) -> None:
+        """真正写注册表并给出悬浮反馈；所有入口都走这里。"""
+        result = autostart.set_enabled(enable)
+        level = self.log.info if result.get("ok") else self.log.warning
+        level("开机自启：%s", result.get("message"))
+        self.show_toast(
+            result.get("message", "开机自启操作完成"), "开机自启",
+            "success" if result.get("ok") else "info",
+        )
+
+    def _reset_autostart_prompt(self) -> None:
+        cfg = dict(self.config.get("autostart", {}) or {})
+        cfg["asked"] = False
+        cfg["remember"] = False
+        cfg["force_ask"] = True
+        self.config.data["autostart"] = cfg
+        self.config.save()
+        self.notify("下次启动将重新询问是否开机自启")
+        self._invalidate()
 
     def _create_shortcut_action(self) -> None:
         """根据当前程序路径生成桌面快捷方式并反馈结果。"""
@@ -970,6 +1041,8 @@ class DesktopApp:
             kind = self._dialog.get("kind")
             if kind == "shortcut":
                 self._draw_shortcut_dialog(c, w, h)
+            elif kind == "autostart":
+                self._draw_autostart_dialog(c, w, h)
             elif kind == "relocate":
                 self._draw_relocate_dialog(c, w, h)
             elif kind == "hotkey":
@@ -1149,6 +1222,54 @@ class DesktopApp:
             (dx + 24, by, bw, bh))
         self._draw_dialog_button(
             c, "dlg_sc_create", "生成快捷方式", "primary",
+            (dx + 24 + bw + gap, by, bw, bh))
+
+    def _draw_autostart_dialog(self, c, w: int, h: int) -> None:
+        """启动询问框：是否开机自启 + 保持选择勾选。"""
+        c.rect(0, 0, w, h, gdi.argb(15, 23, 42, 120))
+        dw, dh = 500, 292
+        dx = max(12, (w - dw) // 2)
+        dy = max(12, (h - dh) // 2)
+        c.rounded(dx + 4, dy + 8, dw, dh, 16, C.SHADOW)
+        c.rounded(dx, dy, dw, dh, 16, C.CARD, C.BORDER)
+
+        c.rounded(dx + 24, dy + 24, 44, 44, 12, C.PRIMARY_SOFT)
+        c.text("启", dx + 24, dy + 24, 44, 44, 20, C.PRIMARY, True,
+               gdi.ALIGN_CENTER)
+        c.text("开机自启", dx + 80, dy + 22, dw - 104, 30, 18,
+               C.TEXT, True)
+        c.text("是否让本程序在登录 Windows 后自动运行？",
+               dx + 26, dy + 68, dw - 52, 24, 13, C.TEXT_SUB)
+        c.text("启动命令：%s" % os.path.basename(shortcut.launch_spec()["target"]),
+               dx + 26, dy + 94, dw - 52, 22, 11.5, C.TEXT_FAINT)
+
+        keep = bool(self._dialog.get("keep", False))
+        kb_rect = (dx + 26, dy + 132, 20, 20)
+        kh = self._hover == "dlg_as_keep"
+        c.rounded(kb_rect[0], kb_rect[1], 20, 20, 6,
+                  C.PRIMARY if keep else (C.PRIMARY_SOFT if kh else C.CARD),
+                  C.PRIMARY if keep else C.BORDER)
+        if keep:
+            c.text("✓", kb_rect[0], kb_rect[1] - 2, 20, 22, 15,
+                   gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
+        c.text("保持当前选择，以后不再询问",
+               dx + 54, dy + 130, dw - 80, 24, 12.5, C.TEXT_SUB)
+        self._hotspots.append({"kind": "dlg_as_keep", "rect": kb_rect})
+        self._hotspots.append({
+            "kind": "dlg_as_keep",
+            "rect": (dx + 26, dy + 128, dw - 52, 28),
+        })
+
+        c.rect(dx + 24, dy + 168, dw - 48, 1, C.DIVIDER)
+        gap = 12
+        bw = (dw - 48 - gap) // 2
+        by = dy + 192
+        bh = 46
+        self._draw_dialog_button(
+            c, "dlg_as_skip", "暂不启用", "default",
+            (dx + 24, by, bw, bh))
+        self._draw_dialog_button(
+            c, "dlg_as_enable", "启用开机自启", "primary",
             (dx + 24 + bw + gap, by, bw, bh))
 
     def _draw_close_dialog(self, c, w: int, h: int) -> None:
@@ -1517,14 +1638,17 @@ class DesktopApp:
         c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
         self._draw_icon_tile(c, "settings", x + 18, y + 16, 36, C.TEXT)
         c.text("设置", x + 64, y + 14, w - 90, 24, 16, C.TEXT, True)
-        c.text("快捷方式固定在上方，快捷键按功能分开设置", x + 18, y + 58,
+        c.text("快捷方式与开机自启固定在上方，快捷键按功能分开设置", x + 18, y + 58,
                w - 36, 22, 12, C.TEXT_SUB)
         c.rect(x + 18, y + 88, w - 36, 1, C.DIVIDER)
 
         sec_y = y + 100
         self._draw_shortcut_section(
             c, x + 16, sec_y, w - 32, (x, sec_y, w, 96))
-        split_y = sec_y + 108
+        as_y = sec_y + 100
+        self._draw_autostart_section(
+            c, x + 16, as_y, w - 32, (x, as_y, w, 96))
+        split_y = as_y + 100
         split_h = max(80, y + h - 16 - split_y)
         self._draw_settings_hotkeys(c, x + 16, split_y, w - 32, split_h)
 
@@ -1548,6 +1672,25 @@ class DesktopApp:
             c, "set_make", "", "更新快捷方式" if exists else "生成快捷方式",
             make, bounds)
         self._draw_mini_button(c, "set_ask", "", "重新询问", ask, bounds)
+
+    def _draw_autostart_section(self, c, x, y, w, bounds) -> None:
+        enabled, current = autostart.status()
+        if enabled and current:
+            state = "开机自启已开启，指向当前程序"
+        elif enabled:
+            state = "开机自启已开启，但指向旧路径，点左侧按钮更新"
+        else:
+            state = "开机自启未开启"
+        state += "  ·  下次启动会询问" if self._should_ask_autostart() \
+            else "  ·  启动时不再询问"
+        c.text("开机自启", x, y, w, 22, 13, C.TEXT, True)
+        c.text(state, x, y + 24, w, 20, 12, C.TEXT_SUB)
+        toggle = (x, y + 52, min(168, w // 2 - 6), 34)
+        ask = (toggle[0] + toggle[2] + 10, y + 52, min(168, w // 2 - 6), 34)
+        self._draw_mini_button(
+            c, "set_as_toggle", "",
+            "关闭开机自启" if enabled else "开启开机自启", toggle, bounds)
+        self._draw_mini_button(c, "set_as_ask", "", "重新询问", ask, bounds)
 
     def _hotkey_groups(self) -> List[dict]:
         groups = []
@@ -2264,6 +2407,14 @@ class DesktopApp:
                         self._resolve_shortcut(True)
                     elif kind == "dlg_sc_skip":
                         self._resolve_shortcut(False)
+                    elif kind == "dlg_as_keep":
+                        self._dialog["keep"] = not self._dialog.get(
+                            "keep", False)
+                        self._invalidate()
+                    elif kind == "dlg_as_enable":
+                        self._resolve_autostart(True)
+                    elif kind == "dlg_as_skip":
+                        self._resolve_autostart(False)
                     elif kind == "dlg_relocate_ok":
                         self._dismiss_relocate()
                     elif kind == "dlg_hk_cancel":
@@ -2285,6 +2436,11 @@ class DesktopApp:
                         self._invalidate()
                     elif kind == "set_ask":
                         self._reset_shortcut_prompt()
+                    elif kind == "set_as_toggle":
+                        enabled, _current = autostart.status()
+                        self._apply_autostart(not enabled)
+                    elif kind == "set_as_ask":
+                        self._reset_autostart_prompt()
                     elif kind == "set_hk_tool":
                         if self._settings_hotkey_tool != spot["tool"]:
                             self._settings_hotkey_tool = spot["tool"]

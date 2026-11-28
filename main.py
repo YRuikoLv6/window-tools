@@ -157,6 +157,25 @@ def selftest(log) -> int:
                  and sc_module.shortcut_is_current(lnk))
         checks.append(("快捷方式生成", bool(valid), "OK"))
 
+    # 开机自启：命令须指向当前程序，状态读取路径不崩溃；不写真实注册表
+    from window_tools.utils import autostart as as_module
+    as_cmd = as_module.command()
+    as_enabled, as_current = as_module.status()
+    as_target = os.path.basename(sc_module.launch_spec()["target"])
+    as_ok = (
+        bool(as_cmd)
+        and as_target in as_cmd
+        and isinstance(as_enabled, bool)
+        and isinstance(as_current, bool)
+        and hasattr(as_module, "set_enabled")
+    )
+    checks.append(("开机自启命令与状态", as_ok, as_target))
+    as_compare_ok = (
+        bool(as_module._normalize(as_cmd))
+        and as_module._normalize('"%s"' % as_cmd) == as_module._normalize(as_cmd)
+    )
+    checks.append(("开机自启路径比对", as_compare_ok, "OK"))
+
     # 关闭确认框：出现时屏蔽背景点击，消失后恢复普通热点
     probe = DesktopApp.__new__(DesktopApp)
     probe._dialog = {"hotspots": []}
@@ -318,6 +337,7 @@ def main() -> int:
         "general": {"auto_detect": True},
         "mouse": {"enabled": False},
         "shortcut": {"asked": False, "remember": False, "create": False},
+        "autostart": {"asked": False, "remember": False, "enabled": False},
         "hotkeys": {},
     })
 
