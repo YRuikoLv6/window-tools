@@ -99,6 +99,7 @@ _draw_string = _api("GdipDrawString", [P, wintypes.LPCWSTR, ctypes.c_int, P,
 _measure_string = _api("GdipMeasureString", [P, wintypes.LPCWSTR, ctypes.c_int,
                                             P, ctypes.POINTER(RectF), P,
                                             ctypes.POINTER(RectF),
+                                            ctypes.POINTER(ctypes.c_int),
                                             ctypes.POINTER(ctypes.c_int)])
 _delete_family = _api("GdipDeleteFontFamily", [P])
 
@@ -401,9 +402,10 @@ class Canvas:
         rect = RectF(0, 0, 10000, 1000)
         used = RectF()
         fitted = ctypes.c_int(0)
+        lines = ctypes.c_int(0)
         _measure_string(self.graphics, str(value), -1, P(font),
                         ctypes.byref(rect), None, ctypes.byref(used),
-                        ctypes.byref(fitted))
+                        ctypes.byref(fitted), ctypes.byref(lines))
         return float(used.Width) / self.scale
 
 

@@ -247,6 +247,27 @@ def selftest(log) -> int:
         relocate_ok = relocate_ok and not os.path.exists(old_exe)
         checks.append(("首次启动独立文件夹", relocate_ok, picked))
 
+    # GDI+ 文字测量：GdipMeasureString 参数声明不完整会导致启动绘制时崩溃
+    try:
+        import win32gui
+        from window_tools.ui import gdi
+        gdi.startup()
+        screen = win32gui.GetDC(0)
+        memdc = win32gui.CreateCompatibleDC(screen)
+        bitmap = win32gui.CreateCompatibleBitmap(screen, 64, 64)
+        old = win32gui.SelectObject(memdc, bitmap)
+        try:
+            with gdi.Canvas(memdc, 64, 64, 1.0) as canvas:
+                measured = canvas.measure("0", 11)
+        finally:
+            win32gui.SelectObject(memdc, old)
+            win32gui.DeleteObject(bitmap)
+            win32gui.DeleteDC(memdc)
+            win32gui.ReleaseDC(0, screen)
+        checks.append(("GDI 文字测量", measured > 0, f"{measured:.1f}px"))
+    except Exception as exc:
+        checks.append(("GDI 文字测量", False, str(exc)))
+
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:
         log.info("%s %s - %s", "PASS" if passed else "FAIL", name, detail)
