@@ -1633,64 +1633,76 @@ class DesktopApp:
                            False, gdi.ALIGN_LEFT, gdi.VALIGN_MIDDLE, False)
                     line_y += 18
 
+    def _draw_setting_group(self, c, x, y, w, h, glyph, accent, soft,
+                            title, state, state_color,
+                            primary_kind, primary_label, ask_kind,
+                            bounds) -> None:
+        """设置项的统一分组条：图标 + 标题 + 彩色状态 + 主次按钮。"""
+        c.rounded(x, y, w, h, 10, C.CARD_SOFT, C.BORDER)
+        c.rounded(x + 12, y + 12, 36, 36, 10, soft)
+        c.text(glyph, x + 12, y + 11, 36, 38, 17, accent, True,
+               gdi.ALIGN_CENTER)
+        c.text(title, x + 58, y + 10, w - 70, 22, 13.5, C.TEXT, True)
+        c.text(state, x + 58, y + 36, w - 70, 20, 11.5, state_color)
+        gap = 10
+        bw = (w - 24 - gap) // 2
+        by = y + h - 38
+        self._draw_mini_button(
+            c, primary_kind, "", primary_label,
+            (x + 12, by, bw, 32), bounds, "primary")
+        self._draw_mini_button(
+            c, ask_kind, "", "重新询问",
+            (x + 12 + bw + gap, by, bw, 32), bounds)
+
     def _draw_settings_page(self, c, x: int, y: int, w: int, h: int) -> None:
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
         c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
         self._draw_icon_tile(c, "settings", x + 18, y + 16, 36, C.TEXT)
         c.text("设置", x + 64, y + 14, w - 90, 24, 16, C.TEXT, True)
-        c.text("快捷方式与开机自启固定在上方，快捷键按功能分开设置", x + 18, y + 58,
+        c.text("桌面入口与开机运行固定在上方，快捷键按功能分开设置", x + 18, y + 58,
                w - 36, 22, 12, C.TEXT_SUB)
         c.rect(x + 18, y + 88, w - 36, 1, C.DIVIDER)
 
-        sec_y = y + 100
+        sec_y = y + 102
         self._draw_shortcut_section(
             c, x + 16, sec_y, w - 32, (x, sec_y, w, 96))
-        as_y = sec_y + 100
+        as_y = sec_y + 108
         self._draw_autostart_section(
             c, x + 16, as_y, w - 32, (x, as_y, w, 96))
-        split_y = as_y + 100
-        split_h = max(80, y + h - 16 - split_y)
-        self._draw_settings_hotkeys(c, x + 16, split_y, w - 32, split_h)
+        split_y = as_y + 116
+        c.text("快捷键设置", x + 18, split_y, w - 36, 20, 12.5, C.TEXT, True)
+        split_h = max(80, y + h - 16 - split_y - 22)
+        self._draw_settings_hotkeys(c, x + 16, split_y + 22, w - 32, split_h)
 
     def _draw_shortcut_section(self, c, x, y, w, bounds) -> None:
         exists, current = self._shortcut_status()
         if current:
-            state = "桌面快捷方式已指向当前程序"
+            state, color = "已指向当前程序", C.SUCCESS
         elif exists:
-            state = "桌面快捷方式未指向当前程序"
+            state, color = "存在但不是当前程序，建议更新", C.WARNING
         else:
-            state = "桌面还没有快捷方式"
-        if self._should_ask_shortcut():
-            state += "  ·  下次启动会询问"
-        else:
-            state += "  ·  启动时不再询问"
-        c.text("桌面快捷方式", x, y, w, 22, 13, C.TEXT, True)
-        c.text(state, x, y + 24, w, 20, 12, C.TEXT_SUB)
-        make = (x, y + 52, min(168, w // 2 - 6), 34)
-        ask = (make[0] + make[2] + 10, y + 52, min(168, w // 2 - 6), 34)
-        self._draw_mini_button(
-            c, "set_make", "", "更新快捷方式" if exists else "生成快捷方式",
-            make, bounds)
-        self._draw_mini_button(c, "set_ask", "", "重新询问", ask, bounds)
+            state, color = "桌面还没有快捷方式", C.WARNING
+        hint = "下次启动会询问" if self._should_ask_shortcut() else "启动时不再询问"
+        self._draw_setting_group(
+            c, x, y, w, 96, "捷", C.PRIMARY, C.PRIMARY_SOFT,
+            "桌面快捷方式", "%s  ·  %s" % (state, hint), color,
+            "set_make", "更新快捷方式" if exists else "生成快捷方式",
+            "set_ask", bounds)
 
     def _draw_autostart_section(self, c, x, y, w, bounds) -> None:
         enabled, current = autostart.status()
         if enabled and current:
-            state = "开机自启已开启，指向当前程序"
+            state, color = "已开启，指向当前程序", C.SUCCESS
         elif enabled:
-            state = "开机自启已开启，但指向旧路径，点左侧按钮更新"
+            state, color = "已开启但指向旧路径，点左侧按钮更新", C.WARNING
         else:
-            state = "开机自启未开启"
-        state += "  ·  下次启动会询问" if self._should_ask_autostart() \
-            else "  ·  启动时不再询问"
-        c.text("开机自启", x, y, w, 22, 13, C.TEXT, True)
-        c.text(state, x, y + 24, w, 20, 12, C.TEXT_SUB)
-        toggle = (x, y + 52, min(168, w // 2 - 6), 34)
-        ask = (toggle[0] + toggle[2] + 10, y + 52, min(168, w // 2 - 6), 34)
-        self._draw_mini_button(
-            c, "set_as_toggle", "",
-            "关闭开机自启" if enabled else "开启开机自启", toggle, bounds)
-        self._draw_mini_button(c, "set_as_ask", "", "重新询问", ask, bounds)
+            state, color = "未开启", C.WARNING
+        hint = "下次启动会询问" if self._should_ask_autostart() else "启动时不再询问"
+        self._draw_setting_group(
+            c, x, y, w, 96, "启", C.SUCCESS, C.SUCCESS_SOFT,
+            "开机自启", "%s  ·  %s" % (state, hint), color,
+            "set_as_toggle", "关闭开机自启" if enabled else "开启开机自启",
+            "set_as_ask", bounds)
 
     def _hotkey_groups(self) -> List[dict]:
         groups = []
@@ -1841,15 +1853,25 @@ class DesktopApp:
                 self._draw_mini_button(
                     c, "hk_reset", row["id"], "默认", reset, bounds)
 
-    def _draw_mini_button(self, c, kind, binding_id, label, rect, bounds) -> None:
+    def _draw_mini_button(self, c, kind, binding_id, label, rect, bounds,
+                          tone: str = "default") -> None:
         key = kind if not binding_id else (kind, binding_id)
         hovered = self._hover == key
         pressed = self._pressed == key
         x, y, w, h = rect
-        fill = C.PRIMARY_SOFT if hovered else C.CARD
-        border = C.PRIMARY if hovered else C.SCROLL
+        if tone == "primary":
+            fill = C.PRIMARY_DARK if pressed else (
+                C.PRIMARY_HOVER if hovered else C.PRIMARY)
+            border = None
+            color = gdi.argb(255, 255, 255)
+            bold = True
+        else:
+            fill = C.PRIMARY_SOFT if hovered else C.CARD
+            border = C.PRIMARY if hovered else C.SCROLL
+            color = C.TEXT
+            bold = False
         c.rounded(x, y + (1 if pressed else 0), w, h, 8, fill, border)
-        c.text(label, x, y + (1 if pressed else 0), w, h, 12, C.TEXT, False,
+        c.text(label, x, y + (1 if pressed else 0), w, h, 12, color, bold,
                gdi.ALIGN_CENTER)
         hit = self._clip_rect(rect, bounds)
         if hit:
