@@ -393,13 +393,13 @@ class DesktopApp:
 
     def show_toast(self, message: str, title: str | None = None,
                    tone: str = "info") -> None:
-        """屏幕左上角悬浮提示；与窗口内通知列表独立。"""
+        """屏幕右下角悬浮提示；与窗口内通知列表独立。"""
         if not self.toast:
             return
         try:
             self.toast.show(title or self.title, message, tone)
         except Exception:
-            self.log.exception("左上角提示显示失败")
+            self.log.exception("右下角提示显示失败")
 
     def note_display_change(self) -> None:
         self.last_display_change = time.time()
@@ -481,12 +481,12 @@ class DesktopApp:
         except Exception:
             self.log.exception("系统托盘初始化失败")
 
-        # 左上角 toast：供鼠标锁定/解锁等操作给出悬浮反馈
+        # 右下角 toast：供鼠标锁定/解锁等操作给出悬浮反馈
         try:
             self.toast = ToastWindow(self.log)
-            self.log.info("左上角提示窗已创建")
+            self.log.info("右下角提示窗已创建")
         except Exception:
-            self.log.exception("左上角提示窗创建失败")
+            self.log.exception("右下角提示窗创建失败")
 
         if self.manager:
             self.manager.load_all()
@@ -1750,7 +1750,7 @@ class DesktopApp:
         ry = y + row_h * 2
         c.text("操作反馈", x + 22, ry + 16, w - 210, 24, 13.5,
                C.TEXT, True)
-        c.text("所有开关操作都会在屏幕左上角给出结果提示",
+        c.text("所有开关操作都会在屏幕右下角给出结果提示",
                x + 22, ry + 44, w - 210, 20, 11, C.TEXT_SUB)
         c.text("数据保存在程序目录的 data 文件夹，不上传网络",
                x + 22, ry + 66, w - 210, 18, 10.5, C.TEXT_FAINT)

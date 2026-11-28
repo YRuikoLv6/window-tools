@@ -1,4 +1,4 @@
-"""屏幕左上角 toast 提示窗。
+"""屏幕右下角 toast 提示窗。
 
 独立的无焦点置顶层窗，圆角卡片样式与主界面一致，显示数秒后自动消失。
 用于鼠标锁定/解锁等操作反馈：即使主窗口隐藏到托盘也能看到提示。
@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 
 import win32api
 import win32con
@@ -20,6 +21,19 @@ _user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
 _user32.SetTimer.restype = ctypes.c_uint
 _user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.KillTimer.restype = ctypes.c_bool
+_user32.SystemParametersInfoW.argtypes = [
+    wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+_user32.SystemParametersInfoW.restype = wintypes.BOOL
+
+
+def work_area() -> tuple[int, int, int, int]:
+    """主屏工作区 (left, top, right, bottom)，已避开任务栏。"""
+    rect = wintypes.RECT()
+    if _user32.SystemParametersInfoW(
+            win32con.SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+        return rect.left, rect.top, rect.right, rect.bottom
+    return (0, 0, int(win32api.GetSystemMetrics(win32con.SM_CXSCREEN)),
+            int(win32api.GetSystemMetrics(win32con.SM_CYSCREEN)))
 
 
 class ToastWindow:
@@ -110,12 +124,10 @@ class ToastWindow:
         self._width = int(self.LOGICAL_W * self.scale)
         self._height = int(self.LOGICAL_H * self.scale)
         self.title, self.message, self.tone = str(title), str(message), tone
-        # 主屏工作区左上角 + 边距，避开任务栏
-        try:
-            work = win32api.SystemParametersInfo(win32con.SPI_GETWORKAREA)
-            x, y = int(work[0]) + self.EDGE, int(work[1]) + self.EDGE
-        except Exception:
-            x = y = self.EDGE
+        # 主屏工作区右下角 - 边距，避开任务栏
+        left, top, right, bottom = work_area()
+        x = right - self._width - self.EDGE
+        y = bottom - self._height - self.EDGE
         win32gui.SetWindowPos(
             self.hwnd, win32con.HWND_TOPMOST, x, y, self._width, self._height,
             win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW,
