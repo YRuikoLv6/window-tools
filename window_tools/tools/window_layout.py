@@ -190,12 +190,32 @@ class WindowLayoutTool(BaseTool):
                 "窗口布局",
             )
 
-    def rescue_offscreen(self) -> None:
-        """把伸出屏幕的窗口钳回所在显示器的工作区，尽量保持原位置。"""
+    def rescue_offscreen(self, include_host: bool = False) -> None:
+        """把伸出屏幕的窗口钳回所在显示器的工作区，尽量保持原位置。
+
+        include_host=True 时同时救援本程序宿主窗口（默认排除，因为
+        enumerate_windows 会忽略 app.hwnd；托盘入口需要救回自身窗口）。
+        """
         virtual = winapi.bounds_to_rect(winapi.get_virtual_bounds())
         monitors = winapi.get_monitors()
         monitor_rects = [m["rect"] for m in monitors]
         moved = 0
+
+        # 本程序主窗口：enumerate_windows 会忽略它，单独处理
+        if include_host and self.app.hwnd and win32gui.IsWindow(self.app.hwnd):
+            hwnd = self.app.hwnd
+            rect = [int(v) for v in win32gui.GetWindowRect(hwnd)]
+            if not winapi.is_zoomed(hwnd) and winapi.is_offscreen(rect, virtual):
+                target = self._clamp_to_monitor(rect, virtual, monitor_rects,
+                                                monitors)
+                if target:
+                    try:
+                        winapi.move_window(hwnd, target)
+                        moved += 1
+                        self.log.info("越界救援: 本程序窗口 %s -> %s",
+                                      rect, target)
+                    except Exception as exc:
+                        self.log.debug("救援本程序窗口失败: %s", exc)
 
         for window in winapi.enumerate_windows(
             self.app.hwnd, self._name_cache
@@ -205,11 +225,10 @@ class WindowLayoutTool(BaseTool):
                 continue
             if not winapi.is_offscreen(rect, virtual):
                 continue
-            index = winapi.monitor_index_for_rect(rect, monitor_rects)
-            monitor = monitors[index % len(monitors)] if monitors else None
-            bounds = (monitor.get("work") or monitor["rect"]) if monitor else virtual
-            target = winapi.clamp_rect(rect, bounds)
-            if tuple(int(v) for v in target) == tuple(int(v) for v in rect):
+            target = self._clamp_to_monitor(rect, virtual, monitor_rects,
+                                            monitors)
+            if not target or tuple(int(v) for v in target) == tuple(
+                    int(v) for v in rect):
                 continue
             try:
                 winapi.move_window(window["hwnd"], target)
@@ -224,6 +243,15 @@ class WindowLayoutTool(BaseTool):
             self.app.notify(f"已拉回 {moved} 个越界窗口", "窗口救援")
         else:
             self.app.notify("没有发现伸出屏幕的窗口", "窗口救援")
+
+    @staticmethod
+    def _clamp_to_monitor(rect, virtual, monitor_rects, monitors):
+        """把越界矩形钳回其中心所在显示器的工作区。"""
+        index = winapi.monitor_index_for_rect(rect, monitor_rects)
+        monitor = monitors[index % len(monitors)] if monitors else None
+        bounds = (monitor.get("work") or monitor["rect"]) if monitor else virtual
+        target = winapi.clamp_rect(rect, bounds)
+        return tuple(int(v) for v in target)
 
     # ------------------------------------------------------------ 快照逻辑 --
     def _take_snapshot(self) -> dict:

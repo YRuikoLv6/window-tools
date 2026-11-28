@@ -26,7 +26,8 @@ from ..paths import ICON_PATH
 from ..ui import gdi
 from ..ui.gdi import C
 from ..ui.tray import (
-    TRAY_EXIT, TRAY_HIDE, TRAY_SHOW, TrayIcon, TrayMenu, WM_TRAYICON,
+    TRAY_EXIT, TRAY_HIDE, TRAY_RESCUE, TRAY_SHOW, TrayIcon, TrayMenu,
+    WM_TRAYICON,
 )
 from ..utils import shortcut, winapi
 from ..utils.hotkeys import (
@@ -529,11 +530,28 @@ class DesktopApp:
             self._show_window()
         elif cmd == TRAY_HIDE:
             self._hide_window()
+        elif cmd == TRAY_RESCUE:
+            self._rescue_from_tray()
         elif cmd == TRAY_EXIT:
             # 托盘菜单“退出程序”是明确指令，不再弹确认框
             if self.hwnd:
                 self._force_exit = True
                 win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
+
+    def _rescue_from_tray(self) -> None:
+        """托盘入口救援：窗口越界时主界面点不到，必须能从托盘救回。"""
+        tool = self.manager.find("窗口布局守护") if self.manager else None
+        if tool is None or not hasattr(tool, "rescue_offscreen"):
+            self.notify("救援功能不可用", "窗口救援")
+            return
+        try:
+            tool.rescue_offscreen(include_host=True)
+        except Exception:
+            self.log.exception("托盘救援执行失败")
+            self.notify("救援执行失败，详见日志", "窗口救援")
+            return
+        # 救援后把本程序窗口显示出来，给出可见反馈
+        self._show_window()
 
     # ------------------------------------------------ 关闭确认对话框 ----
     def _ask_close(self) -> None:

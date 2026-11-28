@@ -184,6 +184,7 @@ def selftest(log) -> int:
 
     # 单实例唤醒：类名固定且不随 PID 变化，唤醒消息不与托盘消息冲突
     from window_tools.core import desktop_app as app_module
+    from window_tools.ui import tray as tray_module
     from window_tools.ui.tray import WM_TRAYICON
     wake_protocol_ok = (
         app_module.WINDOW_CLASS == "WindowToolsDesktop"
@@ -192,6 +193,19 @@ def selftest(log) -> int:
         and app_module.WINDOW_TITLE.endswith(f"v{__version__}")
     )
     checks.append(("单实例唤醒协议", wake_protocol_ok, app_module.WINDOW_CLASS))
+
+    # 托盘救援：命令 ID 不与现有项冲突，且几何钳制能把越界矩形拉回工作区
+    tray_ids = [tray_module.TRAY_SHOW, tray_module.TRAY_HIDE,
+                tray_module.TRAY_EXIT, tray_module.TRAY_RESCUE]
+    rescue_wired = (
+        len(set(tray_ids)) == len(tray_ids)
+        and WindowLayoutTool._clamp_to_monitor(
+            (830, 189, 2013, 857), (0, 0, 1920, 1080),
+            [(0, 0, 1920, 1080)], [{"rect": (0, 0, 1920, 1080),
+                                    "work": (0, 0, 1920, 1040)}],
+        )[2] <= 1920
+    )
+    checks.append(("托盘救援接线", rescue_wired, f"TRAY_RESCUE={tray_module.TRAY_RESCUE}"))
 
     snapshot = collect_system_info()
     titles = [section["title"] for section in snapshot["sections"]]

@@ -29,6 +29,7 @@ WM_TRAYICON = win32con.WM_USER + 100
 TRAY_SHOW = 2001
 TRAY_HIDE = 2002
 TRAY_EXIT = 2003
+TRAY_RESCUE = 2004
 
 _shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
 _shell32.Shell_NotifyIconW.restype = wintypes.BOOL
@@ -132,6 +133,9 @@ class TrayMenu:
             hide_flags = win32con.MF_STRING | (win32con.MF_GRAYED if not visible else 0)
             win32gui.AppendMenu(menu, show_flags, TRAY_SHOW, "显示窗口")
             win32gui.AppendMenu(menu, hide_flags, TRAY_HIDE, "隐藏到托盘")
+            # 救援始终可用：窗口越界时主界面点不到，正需要托盘入口救回
+            win32gui.AppendMenu(menu, win32con.MF_STRING, TRAY_RESCUE,
+                                "救援越界窗口")
             win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
             win32gui.AppendMenu(menu, win32con.MF_STRING, TRAY_EXIT, "退出程序")
             # 先置前台，否则菜单可能不弹出；前台锁定可能失败，忽略即可
