@@ -991,27 +991,28 @@ class DesktopApp:
         self._notice_hits = []
         self._pending_tip = None
 
-        # 标题栏：深色底 + 底部主色细线
+        # 顶栏：Oink 风格白底 + 汉堡图标 + 应用标识 + 细描边窗口按钮
         c.rect(0, 0, w, TITLE_H, C.HEADER_A)
-        c.rounded(0, 0, w, TITLE_H, 1, C.HEADER_A, gradient=C.HEADER_B)
-        c.rect(0, TITLE_H - 2, w, 2, C.HEADER_LINE)
-
-        c.rounded(16, 12, 34, 34, 10, C.PRIMARY)
-        c.text("窗", 16, 12, 34, 34, 16, gdi.argb(255, 255, 255), True,
+        c.rect(0, TITLE_H - 1, w, 1, C.HEADER_LINE)
+        for line_y in (21, 28, 35):
+            c.line(18, line_y, 28, line_y, C.TEXT_SUB, 1.6)
+        c.rounded(44, 12, 34, 34, 11, C.PRIMARY, gradient=C.PRIMARY_HOVER)
+        c.text("窗", 44, 12, 34, 34, 15, gdi.argb(255, 255, 255), True,
                gdi.ALIGN_CENTER)
-        c.text("窗口工具集合", 60, 8, 280, 26, 17,
-               gdi.argb(255, 255, 255), True)
+        c.text("窗口工具集合", 90, 9, 250, 24, 16, C.TEXT, True)
+        c.text("本地工具  ·  无需联网", 90, 32, 250, 17, 10.5,
+               C.TEXT_FAINT)
 
         ctrl = 30
-        gap = 6
+        gap = 4
         close_rect = (w - 14 - ctrl, 14, ctrl, ctrl)
-        min_rect = (close_rect[0] - gap - ctrl, 14, ctrl, ctrl)
+        max_rect = (close_rect[0] - gap - ctrl, 14, ctrl, ctrl)
+        min_rect = (max_rect[0] - gap - ctrl, 14, ctrl, ctrl)
         settings_rect = (min_rect[0] - gap - 56, 14, 56, ctrl)
-        c.text("左侧切换功能，中间只显示当前功能的操作", 60, 32,
-               max(80, settings_rect[0] - 72), 18, 11, gdi.argb(203, 213, 225))
         self._draw_caption_button(c, "settings", settings_rect, "设置", 12)
         self._draw_caption_button(c, "min", min_rect, "–", 16)
-        self._draw_caption_button(c, "close", close_rect, "×", 16)
+        self._draw_caption_button(c, "max", max_rect, "□", 13)
+        self._draw_caption_button(c, "close", close_rect, "×", 17)
 
         self._draw_metric_strip(c, w)
 
@@ -1055,20 +1056,21 @@ class DesktopApp:
         x, y, bw, bh = rect
         hovered = self._hover == kind
         pressed = self._pressed == kind
-        if kind == "close" and (hovered or pressed):
-            fill = C.DANGER_DARK if pressed else C.DANGER
+        if kind == "settings":
+            c.rounded(x, y, bw, bh, 15,
+                      C.PRIMARY_SOFT if hovered or pressed else C.CARD_SOFT,
+                      C.PRIMARY if hovered or pressed else C.BORDER)
+            color = C.PRIMARY if hovered or pressed else C.TEXT_SUB
+        elif kind == "close" and (hovered or pressed):
+            c.rounded(x, y, bw, bh, 8, C.DANGER)
             color = gdi.argb(255, 255, 255)
         elif hovered or pressed:
-            fill = gdi.argb(255, 255, 255, 64 if pressed else 36)
-            color = gdi.argb(255, 255, 255)
+            c.rounded(x, y, bw, bh, 8, C.DIVIDER)
+            color = C.TEXT
         else:
-            fill = 0
-            color = gdi.argb(226, 232, 240)
-        if fill:
-            c.rounded(x, y, bw, bh, 8, fill)
-        weight = kind == "settings"
-        c.text(glyph, x, y - 1, bw, bh + 2, size, color, weight,
-               gdi.ALIGN_CENTER)
+            color = C.TEXT_SUB
+        c.text(glyph, x, y - 1, bw, bh + 2, size, color,
+               kind == "settings", gdi.ALIGN_CENTER)
         self._hotspots.append({"kind": kind, "rect": rect})
 
     def _footer_text(self) -> str:
@@ -1340,9 +1342,11 @@ class DesktopApp:
         cell = max(80, (w - 2 * PAD) // len(metrics))
         for index, (label, value, accent) in enumerate(metrics):
             x = PAD + index * cell
-            c.ellipse(x, y + 16, 8, 8, accent)
-            c.text(f"{label}  {value}", x + 14, y, cell - 22, STRIP_H,
-                   12, C.TEXT)
+            if index:
+                c.rect(x - 12, y + 10, 1, 20, C.DIVIDER)
+            c.ellipse(x, y + 16, 7, 7, accent)
+            c.text(label, x + 13, y, 56, STRIP_H, 11, C.TEXT_FAINT)
+            c.text(value, x + 68, y, cell - 78, STRIP_H, 11.5, C.TEXT, True)
 
     def _draw_nav(self, c, x: int, y: int, w: int, h: int) -> None:
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
@@ -1356,6 +1360,7 @@ class DesktopApp:
                   C.PRIMARY_SOFT)
         c.text(count, x + w - badge_w - 14, y + 12, badge_w, 22, 11,
                C.PRIMARY, False, gdi.ALIGN_CENTER)
+        c.rect(x + 16, y + 40, w - 32, 1, C.DIVIDER)
 
         footer_rows = len(pinned_blocks) + 1
         list_y = y + 44
@@ -1476,8 +1481,13 @@ class DesktopApp:
         self._draw_icon_tile(
             c, self._feature_icon(block["name"]),
             row[0] + 12, row[1] + 8, 28, accent)
-        c.text(block["name"], row[0] + 48, row[1], row[2] - 58,
-               row[3], 13, C.TEXT, active)
+        c.text(block["name"], row[0] + 48, row[1] + 1, row[2] - 90,
+               22, 13, C.TEXT, active)
+        status = " ".join((block.get("status") or "").split())[:18]
+        c.text(status, row[0] + 48, row[1] + 23, row[2] - 90, 17,
+               10, C.TEXT_FAINT)
+        c.ellipse(row[0] + row[2] - 16, row[1] + 19, 7, 7,
+                  C.SUCCESS if active else C.SCROLL)
         hit = row if bounds is None else self._clip_rect(row, bounds)
         if hit:
             self._hotspots.append({
@@ -1499,13 +1509,15 @@ class DesktopApp:
                 break
         self._draw_icon_tile(
             c, self._feature_icon(block["name"]), x + 18, y + 16, 36, accent)
-        badge = "v" + block["version"]
-        badge_w = max(52, int(c.measure(badge, 11) + 16))
+        badge = "本地  v" + block["version"]
+        badge_w = max(84, int(c.measure(badge, 11) + 34))
+        badge_x = x + w - badge_w - 16
         c.text(block["name"], x + 64, y + 14, w - 84 - badge_w, 24, 16,
                C.TEXT, True)
-        c.rounded(x + w - badge_w - 16, y + 16, badge_w, 22, 11, C.PRIMARY_SOFT)
-        c.text(badge, x + w - badge_w - 16, y + 16, badge_w, 22, 11,
-               C.PRIMARY, False, gdi.ALIGN_CENTER)
+        c.rounded(badge_x, y + 16, badge_w, 22, 11, C.CARD_SOFT, C.BORDER)
+        c.ellipse(badge_x + 10, y + 22, 6, 6, C.SUCCESS)
+        c.text(badge, badge_x + 20, y + 16, badge_w - 24, 22, 11,
+               C.TEXT_SUB)
         c.text(block.get("description") or "", x + 18, y + 58, w - 36, 22,
                12, C.TEXT_SUB)
         c.text(block["status"], x + 18, y + 80, w - 36, 20, 12, C.TEXT_FAINT)
@@ -1974,12 +1986,12 @@ class DesktopApp:
             bold = True
         else:
             fill = C.PRIMARY_SOFT if hovered else C.CARD
-            border = C.PRIMARY if hovered else C.SCROLL
+            border = C.PRIMARY if hovered else C.BORDER
             text = C.TEXT
             hint_color = C.TEXT_SUB
             bold = False
         offset = 1 if pressed else 0
-        radius = 10
+        radius = 12
         c.rounded(x, y + 2, w, h - 2, radius, C.SHADOW)
         c.rounded(x, y + offset, w, h - 2, radius, fill, border)
 
@@ -2186,20 +2198,26 @@ class DesktopApp:
             line_y += 20
 
     def _draw_window_row(self, c, x, y, w, h, row: dict) -> None:
+        """窗口行：借鉴 Oink 设备卡片的缩略图 + 名称标签样式。"""
         off = bool(row.get("off"))
+        tx, ty, tw, th = x + 10, y + 9, 40, 28
         if off:
-            c.rounded(x + 10, y + 4, w - 28, h - 8, 8, C.DANGER_SOFT)
+            c.rounded(tx, ty, tw, th, 6, C.DANGER_SOFT, C.DANGER)
+            c.text("!", tx, ty, tw, th, 15, C.DANGER, True, gdi.ALIGN_CENTER)
+        else:
+            c.rounded(tx, ty, tw, th, 6,
+                      gdi.argb(219, 234, 254), gdi.argb(191, 219, 254))
+            c.rounded(tx + 4, ty + 4, 14, 20, 3, gdi.argb(59, 130, 246))
+            c.rounded(tx + 21, ty + 4, 15, 8, 2, gdi.argb(147, 197, 253))
+            c.rounded(tx + 21, ty + 16, 15, 8, 2, gdi.argb(147, 197, 253))
         title_color = C.DANGER if off else C.TEXT
-        c.text(row.get("title", ""), x + 16, y + 3, w - 40, 22, 12.5,
+        c.text(row.get("title", ""), x + 58, y + 3, w - 76, 22, 12.5,
                title_color, True)
         process = row.get("process") or ""
-        if off:
-            sub = "越界" + (f"  ·  {process}" if process else "")
-        else:
-            sub = process
-        meta = f"{row.get('pos', '')}    {row.get('size', '')}"
-        c.text(sub, x + 16, y + 24, int(w * 0.52), 18, 11, C.TEXT_FAINT)
-        c.text(meta, x + 16, y + 24, w - 40, 18, 11,
+        sub = ("越界" + (f"  ·  {process}" if process else "")) if off else process
+        meta = f"{row.get('pos', '')}  {row.get('size', '')}"
+        c.text(sub, x + 58, y + 24, int(w * 0.42), 18, 11, C.TEXT_FAINT)
+        c.text(meta, x + 58, y + 24, w - 76, 18, 11,
                C.DANGER if off else C.TEXT_SUB, False, gdi.ALIGN_RIGHT)
 
     # -------------------------------------------------------- 交互处理 --
@@ -2480,6 +2498,10 @@ class DesktopApp:
                         ).start()
                     elif kind == "min":
                         win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                    elif kind == "max":
+                        action = (win32con.SW_RESTORE if win32gui.IsZoomed(hwnd)
+                                  else win32con.SW_MAXIMIZE)
+                        win32gui.ShowWindow(hwnd, action)
                     elif kind == "close":
                         self._ask_close()
                 return 0
