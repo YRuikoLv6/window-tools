@@ -180,6 +180,8 @@ class DesktopApp:
         self._settings_scroll = 0
         self._settings_nav_scroll = 0
         self._settings_hotkey_tool = ""
+        self._settings_category = "通用"
+        self._settings_return_tool = ""
         self._notice_scroll = 0
         self._window_scroll = 0
         self._notice_lines: List[dict] = []
@@ -795,6 +797,7 @@ class DesktopApp:
         current = self._selected_tool
         if current and current != SETTINGS_ID:
             self._settings_hotkey_tool = current
+            self._settings_return_tool = current
         self._selected_tool = SETTINGS_ID
         self._settings_scroll = 0
         self._invalidate()
@@ -1028,12 +1031,13 @@ class DesktopApp:
         main_x = PAD + NAV_W + gap
         list_x = main_x + main_w + gap
 
-        self._draw_nav(c, PAD, body_y, NAV_W, body_h)
         if self._selected_name() == SETTINGS_ID:
-            self._draw_settings_page(c, main_x, body_y, main_w, body_h)
+            # 设置页独占整个主体区域，采用 Oink 风格的左侧分类 + 右侧开关列表
+            self._draw_settings_page(c, PAD, body_y, w - 2 * PAD, body_h)
         else:
+            self._draw_nav(c, PAD, body_y, NAV_W, body_h)
             self._draw_tool_page(c, main_x, body_y, main_w, body_h)
-        self._draw_lists(c, list_x, body_y, list_w, body_h)
+            self._draw_lists(c, list_x, body_y, list_w, body_h)
 
         self._draw_footer(c, w, h)
         self._draw_notice_tip(c, w, h)
@@ -1667,54 +1671,190 @@ class DesktopApp:
             (x + 12 + bw + gap, by, bw, 32), bounds)
 
     def _draw_settings_page(self, c, x: int, y: int, w: int, h: int) -> None:
+        """设置页：左侧分类导航 + 右侧开关列表（Oink 设置页风格）。"""
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
         c.rounded(x, y, w, h, CARD_RADIUS, C.CARD, C.BORDER)
-        self._draw_icon_tile(c, "settings", x + 18, y + 16, 36, C.TEXT)
-        c.text("设置", x + 64, y + 14, w - 90, 24, 16, C.TEXT, True)
-        c.text("桌面入口与开机运行固定在上方，快捷键按功能分开设置", x + 18, y + 58,
-               w - 36, 22, 12, C.TEXT_SUB)
-        c.rect(x + 18, y + 88, w - 36, 1, C.DIVIDER)
 
-        sec_y = y + 102
-        self._draw_shortcut_section(
-            c, x + 16, sec_y, w - 32, (x, sec_y, w, 96))
-        as_y = sec_y + 108
-        self._draw_autostart_section(
-            c, x + 16, as_y, w - 32, (x, as_y, w, 96))
-        split_y = as_y + 116
-        c.text("快捷键设置", x + 18, split_y, w - 36, 20, 12.5, C.TEXT, True)
-        split_h = max(80, y + h - 16 - split_y - 22)
-        self._draw_settings_hotkeys(c, x + 16, split_y + 22, w - 32, split_h)
+        back = (x + 16, y + 12, 34, 34)
+        back_hover = self._hover == "settings_back"
+        c.rounded(back[0], back[1], back[2], back[3], 9,
+                  C.CARD_SOFT if back_hover else C.CARD, C.BORDER)
+        c.text("←", back[0], back[1] - 1, back[2], back[3], 16,
+               C.TEXT_SUB, True, gdi.ALIGN_CENTER)
+        self._hotspots.append({"kind": "settings_back", "rect": back})
+        c.text("设置", x + 62, y + 11, 220, 26, 17, C.TEXT, True)
+        c.text("本机偏好设置", x + 62, y + 35, 220, 18, 10.5, C.TEXT_FAINT)
+        c.rect(x + 16, y + 60, w - 32, 1, C.DIVIDER)
 
-    def _draw_shortcut_section(self, c, x, y, w, bounds) -> None:
+        nav_w = 210 if w >= 800 else 170
+        gap = 18
+        nav_x = x + 18
+        content_x = nav_x + nav_w + gap
+        content_w = x + w - 18 - content_x
+        nav_y = y + 72
+        nav_h = max(80, h - 88)
+
+        # 搜索框（视觉占位，分类数量很少，不需要真实过滤）
+        c.rounded(nav_x, nav_y, nav_w, 36, 18, C.CARD_SOFT, C.BORDER)
+        c.text("⌕", nav_x + 12, nav_y + 5, 22, 24, 15, C.TEXT_FAINT)
+        c.text("搜索设置", nav_x + 36, nav_y + 6, nav_w - 48, 22,
+               11.5, C.TEXT_FAINT)
+
+        categories = (("通用", "通"), ("快捷键", "键"), ("关于", "关"))
+        cat_y = nav_y + 50
+        row_h = 44
+        for index, (label, glyph) in enumerate(categories):
+            row = (nav_x, cat_y + index * row_h, nav_w, row_h - 6)
+            active = self._settings_category == label
+            hovered = self._hover == ("set_cat", label)
+            if active:
+                c.rounded(row[0], row[1], row[2], row[3], 9, C.PRIMARY_SOFT)
+                c.rounded(row[0], row[1] + 8, 3, row[3] - 16, 1, C.PRIMARY)
+            elif hovered:
+                c.rounded(row[0], row[1], row[2], row[3], 9, C.CARD_SOFT)
+            c.rounded(nav_x + 12, row[1] + 6, 26, 26, 7,
+                      C.PRIMARY if active else C.TEXT_SUB)
+            c.text(glyph, nav_x + 12, row[1] + 6, 26, 26, 12,
+                   gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
+            c.text(label, nav_x + 48, row[1], row[2] - 62, row[3],
+                   12.5, C.TEXT, active)
+            self._hotspots.append({
+                "kind": "set_cat", "rect": row, "cat": label,
+            })
+        c.text(f"v{__version__}  ·  本地运行", nav_x + 4, y + h - 36,
+               nav_w - 8, 20, 10.5, C.TEXT_FAINT)
+
+        if content_w < 220:
+            return
+        c.text(self._settings_category, content_x, nav_y + 1, content_w,
+               24, 14, C.TEXT, True)
+        body_y = nav_y + 34
+        body_h = max(80, y + h - 16 - body_y)
+        if self._settings_category == "快捷键":
+            self._draw_settings_hotkeys(c, content_x, body_y, content_w, body_h)
+        elif self._settings_category == "关于":
+            self._draw_about_settings(c, content_x, body_y, content_w, body_h)
+        else:
+            self._draw_general_settings(c, content_x, body_y, content_w, body_h)
+
+    def _draw_general_settings(self, c, x, y, w, h) -> None:
+        """通用设置：标题 + 说明 + 右侧开关/按钮，行间细分隔。"""
+        c.rounded(x, y, w, h, 12, C.CARD, C.BORDER)
+        c.clip(x, y, w, h)
+        row_h = 96
+        bounds = (x, y, w, h)
+
+        # 桌面快捷方式
         exists, current = self._shortcut_status()
-        if current:
-            state, color = "已指向当前程序", C.SUCCESS
-        elif exists:
-            state, color = "存在但不是当前程序，建议更新", C.WARNING
-        else:
-            state, color = "桌面还没有快捷方式", C.WARNING
-        hint = "下次启动会询问" if self._should_ask_shortcut() else "启动时不再询问"
-        self._draw_setting_group(
-            c, x, y, w, 96, "捷", C.PRIMARY, C.PRIMARY_SOFT,
-            "桌面快捷方式", "%s  ·  %s" % (state, hint), color,
-            "set_make", "更新快捷方式" if exists else "生成快捷方式",
-            "set_ask", bounds)
+        c.text("桌面快捷方式", x + 22, y + 16, w - 210, 24, 13.5,
+               C.TEXT, True)
+        state = ("已指向当前程序" if current else
+                 "存在但不是当前程序，建议更新" if exists else "桌面还没有快捷方式")
+        c.text(state, x + 22, y + 44, w - 210, 20, 11,
+               C.SUCCESS if current else C.WARNING)
+        c.text("登录后可一键打开工具，快捷方式始终指向程序当前路径",
+               x + 22, y + 66, w - 210, 18, 10.5, C.TEXT_FAINT)
+        self._draw_mini_button(
+            c, "set_make", "", "更新快捷方式" if exists else "生成快捷方式",
+            (x + w - 168, y + 22, 146, 34), bounds, "primary")
+        self._draw_mini_button(
+            c, "set_ask", "", "重新询问",
+            (x + w - 168, y + 60, 146, 28), bounds)
+        c.rect(x + 22, y + row_h - 1, w - 44, 1, C.DIVIDER)
 
-    def _draw_autostart_section(self, c, x, y, w, bounds) -> None:
-        enabled, current = autostart.status()
-        if enabled and current:
-            state, color = "已开启，指向当前程序", C.SUCCESS
-        elif enabled:
-            state, color = "已开启但指向旧路径，点左侧按钮更新", C.WARNING
-        else:
-            state, color = "未开启", C.WARNING
-        hint = "下次启动会询问" if self._should_ask_autostart() else "启动时不再询问"
-        self._draw_setting_group(
-            c, x, y, w, 96, "启", C.SUCCESS, C.SUCCESS_SOFT,
-            "开机自启", "%s  ·  %s" % (state, hint), color,
-            "set_as_toggle", "关闭开机自启" if enabled else "开启开机自启",
-            "set_as_ask", bounds)
+        # 开机自启
+        ry = y + row_h
+        enabled, current_as = autostart.status()
+        c.text("开机自动启动", x + 22, ry + 16, w - 210, 24, 13.5,
+               C.TEXT, True)
+        state_as = ("已开启，指向当前程序" if enabled and current_as else
+                    "已开启但指向旧路径，点开关更新" if enabled else "未开启")
+        c.text(state_as, x + 22, ry + 44, w - 210, 20, 11,
+               C.SUCCESS if enabled and current_as else C.WARNING)
+        c.text("登录系统后自动打开窗口工具集合，在后台保持运行",
+               x + 22, ry + 66, w - 210, 18, 10.5, C.TEXT_FAINT)
+        self._draw_switch(c, (x + w - 150, ry + 24, 70, 32),
+                          enabled, "set_as_toggle")
+        self._draw_mini_button(
+            c, "set_as_ask", "", "重新询问",
+            (x + w - 168, ry + 60, 146, 28), bounds)
+        c.rect(x + 22, ry + row_h - 1, w - 44, 1, C.DIVIDER)
+
+        # 操作反馈
+        ry = y + row_h * 2
+        c.text("操作反馈", x + 22, ry + 16, w - 210, 24, 13.5,
+               C.TEXT, True)
+        c.text("所有开关操作都会在屏幕左上角给出结果提示",
+               x + 22, ry + 44, w - 210, 20, 11, C.TEXT_SUB)
+        c.text("数据保存在程序目录的 data 文件夹，不上传网络",
+               x + 22, ry + 66, w - 210, 18, 10.5, C.TEXT_FAINT)
+        c.rect(x + 22, ry + row_h - 1, w - 44, 1, C.DIVIDER)
+
+        # 通知级别
+        ry = y + row_h * 3
+        c.text("通知级别", x + 22, ry + 16, w - 210, 24, 13.5,
+               C.TEXT, True)
+        c.text("选择本机显示的通知详细程度",
+               x + 22, ry + 44, w - 210, 20, 11, C.TEXT_SUB)
+        c.text("操作结果与异常会集中提示，避免打扰",
+               x + 22, ry + 66, w - 210, 18, 10.5, C.TEXT_FAINT)
+        c.rounded(x + w - 150, ry + 24, 110, 32, 16, C.CARD_SOFT, C.BORDER)
+        c.text("默认", x + w - 150, ry + 24, 110, 32, 11.5,
+               C.TEXT_SUB, False, gdi.ALIGN_CENTER)
+        c.rect(x + 22, ry + row_h - 1, w - 44, 1, C.DIVIDER)
+
+        # 快捷键入口
+        ry = y + row_h * 4
+        c.text("快捷键设置", x + 22, ry + 16, w - 210, 24, 13.5,
+               C.TEXT, True)
+        c.text("自定义工具的全局热键",
+               x + 22, ry + 44, w - 210, 20, 11, C.TEXT_SUB)
+        c.text("修改后默认组合不再响应，可随时恢复",
+               x + 22, ry + 66, w - 210, 18, 10.5, C.TEXT_FAINT)
+        jump = (x + w - 150, ry + 24, 110, 34)
+        c.rounded(jump[0], jump[1], jump[2], jump[3], 10,
+                  C.PRIMARY_SOFT, C.PRIMARY)
+        c.text("前往设置", jump[0], jump[1], jump[2], jump[3], 11.5,
+               C.PRIMARY, True, gdi.ALIGN_CENTER)
+        self._hotspots.append({
+            "kind": "set_cat", "rect": jump, "cat": "快捷键",
+        })
+        c.reset_clip()
+
+    def _draw_switch(self, c, rect, on: bool, kind: str) -> None:
+        x, y, w, h = rect
+        hovered = self._hover == kind
+        c.rounded(x, y, w, h, h // 2,
+                  C.SUCCESS if on else C.SCROLL,
+                  None if on else C.BORDER)
+        knob = h - 6
+        kx = x + w - knob - 3 if on else x + 3
+        c.ellipse(kx, y + 3, knob, knob, C.CARD)
+        if hovered:
+            c.stroke_rounded(x, y, w, h, h // 2, C.PRIMARY, 1.2)
+        self._hotspots.append({"kind": kind, "rect": rect})
+
+    def _draw_about_settings(self, c, x, y, w, h) -> None:
+        c.rounded(x, y, w, h, 12, C.CARD, C.BORDER)
+        c.rounded(x + 22, y + 24, 46, 46, 13, C.PRIMARY,
+                  gradient=C.PRIMARY_HOVER)
+        c.text("窗", x + 22, y + 24, 46, 46, 21,
+               gdi.argb(255, 255, 255), True, gdi.ALIGN_CENTER)
+        c.text("窗口工具集合", x + 84, y + 24, w - 110, 26, 16,
+               C.TEXT, True)
+        c.text(f"版本 {__version__}  ·  本机自绘界面，无需浏览器",
+               x + 84, y + 52, w - 110, 20, 11, C.TEXT_SUB)
+        c.rect(x + 22, y + 94, w - 44, 1, C.DIVIDER)
+        lines = (
+            "窗口布局守护：保存并自动还原窗口位置",
+            "鼠标屏幕锁定：把光标限制在当前显示器",
+            "本机信息：查看系统、硬件与网卡地址",
+            "桌面快捷方式与开机自启：首次启动询问，可随时修改",
+        )
+        for index, text in enumerate(lines):
+            c.ellipse(x + 26, y + 118 + index * 32, 6, 6, C.PRIMARY)
+            c.text(text, x + 42, y + 110 + index * 32, w - 70, 22,
+                   11.5, C.TEXT_SUB)
 
     def _hotkey_groups(self) -> List[dict]:
         groups = []
@@ -2471,6 +2611,15 @@ class DesktopApp:
                         self.reset_hotkey(spot["id"])
                     elif kind in ("settings", "nav_settings"):
                         self._open_settings()
+                    elif kind == "settings_back":
+                        target = self._settings_return_tool
+                        names = [b["name"] for b in self._tool_blocks]
+                        self._selected_tool = (target if target in names
+                                               else (names[0] if names else ""))
+                        self._invalidate()
+                    elif kind == "set_cat":
+                        self._settings_category = spot["cat"]
+                        self._invalidate()
                     elif kind == "set_make":
                         self._create_shortcut_action()
                         self._invalidate()
