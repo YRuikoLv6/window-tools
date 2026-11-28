@@ -196,7 +196,8 @@ def selftest(log) -> int:
 
     # 托盘救援：命令 ID 不与现有项冲突，且几何钳制能把越界矩形拉回工作区
     tray_ids = [tray_module.TRAY_SHOW, tray_module.TRAY_HIDE,
-                tray_module.TRAY_EXIT, tray_module.TRAY_RESCUE]
+                tray_module.TRAY_EXIT, tray_module.TRAY_RESCUE,
+                tray_module.TRAY_MOUSE_TOGGLE]
     rescue_wired = (
         len(set(tray_ids)) == len(tray_ids)
         and WindowLayoutTool._clamp_to_monitor(
@@ -206,6 +207,16 @@ def selftest(log) -> int:
         )[2] <= 1920
     )
     checks.append(("托盘救援接线", rescue_wired, f"TRAY_RESCUE={tray_module.TRAY_RESCUE}"))
+
+    # 托盘鼠标锁定：命令 ID 唯一，且 app 侧已接线到 toggle 处理
+    mouse_wired = (
+        len(set(tray_ids)) == len(tray_ids)
+        and tray_module.TRAY_MOUSE_TOGGLE == 2005
+        and hasattr(app_module.DesktopApp, "_toggle_mouse_from_tray")
+        and hasattr(MouseLockTool, "toggle")
+    )
+    checks.append(("托盘鼠标锁定接线", mouse_wired,
+                   f"TRAY_MOUSE_TOGGLE={tray_module.TRAY_MOUSE_TOGGLE}"))
 
     snapshot = collect_system_info()
     titles = [section["title"] for section in snapshot["sections"]]

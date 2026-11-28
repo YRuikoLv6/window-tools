@@ -26,8 +26,8 @@ from ..paths import ICON_PATH
 from ..ui import gdi
 from ..ui.gdi import C
 from ..ui.tray import (
-    TRAY_EXIT, TRAY_HIDE, TRAY_RESCUE, TRAY_SHOW, TrayIcon, TrayMenu,
-    WM_TRAYICON,
+    TRAY_EXIT, TRAY_HIDE, TRAY_MOUSE_TOGGLE, TRAY_RESCUE, TRAY_SHOW,
+    TrayIcon, TrayMenu, WM_TRAYICON,
 )
 from ..utils import shortcut, winapi
 from ..utils.hotkeys import (
@@ -532,6 +532,8 @@ class DesktopApp:
             self._hide_window()
         elif cmd == TRAY_RESCUE:
             self._rescue_from_tray()
+        elif cmd == TRAY_MOUSE_TOGGLE:
+            self._toggle_mouse_from_tray()
         elif cmd == TRAY_EXIT:
             # 托盘菜单“退出程序”是明确指令，不再弹确认框
             if self.hwnd:
@@ -552,6 +554,28 @@ class DesktopApp:
             return
         # 救援后把本程序窗口显示出来，给出可见反馈
         self._show_window()
+
+    def _mouse_lock_tool(self):
+        """取鼠标锁定工具实例；未注册时返回 None。"""
+        tool = self.manager.find("鼠标屏幕锁定") if self.manager else None
+        return tool if tool and hasattr(tool, "toggle") else None
+
+    def _mouse_locked(self) -> bool:
+        """供托盘菜单显示正确的锁定/解锁文案。"""
+        tool = self._mouse_lock_tool()
+        return bool(getattr(tool, "enabled", False)) if tool else False
+
+    def _toggle_mouse_from_tray(self) -> None:
+        """托盘入口切换鼠标锁定：复用工具的 toggle，通知也由工具发出。"""
+        tool = self._mouse_lock_tool()
+        if tool is None:
+            self.notify("鼠标锁定功能不可用", "鼠标锁定")
+            return
+        try:
+            tool.toggle()
+        except Exception:
+            self.log.exception("托盘切换鼠标锁定失败")
+            self.notify("操作失败，详见日志", "鼠标锁定")
 
     # ------------------------------------------------ 关闭确认对话框 ----
     def _ask_close(self) -> None:
@@ -704,7 +728,9 @@ class DesktopApp:
         elif event == win32con.WM_RBUTTONUP:
             if self.tray_menu:
                 try:
-                    self.tray_menu.show(win32gui.IsWindowVisible(self.hwnd))
+                    self.tray_menu.show(
+                        win32gui.IsWindowVisible(self.hwnd), self._mouse_locked()
+                    )
                 except Exception:
                     self.log.exception("托盘菜单弹出失败")
 

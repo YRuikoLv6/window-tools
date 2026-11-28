@@ -30,6 +30,7 @@ TRAY_SHOW = 2001
 TRAY_HIDE = 2002
 TRAY_EXIT = 2003
 TRAY_RESCUE = 2004
+TRAY_MOUSE_TOGGLE = 2005
 
 _shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
 _shell32.Shell_NotifyIconW.restype = wintypes.BOOL
@@ -126,7 +127,7 @@ class TrayMenu:
         self.callback = callback
         self.menu = 0
 
-    def show(self, visible: bool) -> None:
+    def show(self, visible: bool, mouse_locked: bool = False) -> None:
         menu = win32gui.CreatePopupMenu()
         try:
             show_flags = win32con.MF_STRING | (win32con.MF_GRAYED if visible else 0)
@@ -136,6 +137,10 @@ class TrayMenu:
             # 救援始终可用：窗口越界时主界面点不到，正需要托盘入口救回
             win32gui.AppendMenu(menu, win32con.MF_STRING, TRAY_RESCUE,
                                 "救援越界窗口")
+            # 鼠标锁定/解锁共用一个切换命令，按当前状态显示文字，避免歧义
+            mouse_label = "解锁鼠标" if mouse_locked else "锁定鼠标"
+            win32gui.AppendMenu(menu, win32con.MF_STRING, TRAY_MOUSE_TOGGLE,
+                                mouse_label)
             win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
             win32gui.AppendMenu(menu, win32con.MF_STRING, TRAY_EXIT, "退出程序")
             # 先置前台，否则菜单可能不弹出；前台锁定可能失败，忽略即可
