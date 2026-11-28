@@ -52,7 +52,6 @@ SC_MONITORPOWER = getattr(win32con, "SC_MONITORPOWER", 0xF170)
 
 TITLE_H = 58
 PAD = 20
-STRIP_H = 40
 NAV_W = 208
 NAV_ROW = 54
 SETTINGS_ID = "__settings__"
@@ -186,7 +185,6 @@ class DesktopApp:
         self._window_scroll = 0
         self._notice_lines: List[dict] = []
         self._window_lines: List[dict] = []
-        self._metrics: List[Tuple[str, str, int]] = []
         self._pointer: Tuple[int, int] | None = None
         self._tracking_leave = False
         self._notice_hits: List[dict] = []
@@ -879,22 +877,6 @@ class DesktopApp:
             elif signature != self._last_signature:
                 self._last_signature = signature
                 self._schedule_display_change("配置轮询")
-            vx, vy, vw, vh = signature["virtual"]
-            monitors = signature["monitors"]
-            primary = monitors[0] if monitors else [0, 0, 0, 0]
-            dpi_label = {
-                "PER_MONITOR_AWARE_V2": "Per-Monitor V2",
-                "PER_MONITOR_AWARE": "Per-Monitor",
-                "SYSTEM_AWARE": "System",
-                "UNAWARE": "Unaware",
-            }.get(self.dpi_mode, self.dpi_mode)
-            self._metrics = [
-                ("虚拟桌面", f"{vw}×{vh}", C.PRIMARY),
-                ("显示器", f"{signature['count']} 台", C.SUCCESS),
-                ("主屏", f"{primary[2]}×{primary[3]}", C.WARNING),
-                ("DPI 模式", dpi_label, C.PRIMARY),
-            ]
-
             self._notice_lines = [
                 {"time": n["time"], "title": n["title"],
                  "message": n["message"]}
@@ -1017,9 +999,7 @@ class DesktopApp:
         self._draw_caption_button(c, "max", max_rect, "□", 13)
         self._draw_caption_button(c, "close", close_rect, "×", 17)
 
-        self._draw_metric_strip(c, w)
-
-        body_y = TITLE_H + STRIP_H + 12
+        body_y = TITLE_H + 12
         body_h = max(120, h - body_y - FOOTER_H - 8)
         gap = 12
         remain = max(360, w - 2 * PAD - NAV_W - gap)
@@ -1337,20 +1317,6 @@ class DesktopApp:
         if x2 <= x or y2 <= y:
             return None
         return x, y, x2 - x, y2 - y
-
-    def _draw_metric_strip(self, c, w: int) -> None:
-        y = TITLE_H
-        c.rect(0, y, w, STRIP_H, C.CARD)
-        c.rect(0, y + STRIP_H - 1, w, 1, C.DIVIDER)
-        metrics = self._metrics or [("屏幕", "—", C.TEXT_FAINT)]
-        cell = max(80, (w - 2 * PAD) // len(metrics))
-        for index, (label, value, accent) in enumerate(metrics):
-            x = PAD + index * cell
-            if index:
-                c.rect(x - 12, y + 10, 1, 20, C.DIVIDER)
-            c.ellipse(x, y + 16, 7, 7, accent)
-            c.text(label, x + 13, y, 56, STRIP_H, 11, C.TEXT_FAINT)
-            c.text(value, x + 68, y, cell - 78, STRIP_H, 11.5, C.TEXT, True)
 
     def _draw_nav(self, c, x: int, y: int, w: int, h: int) -> None:
         c.rounded(x, y + 3, w, h, CARD_RADIUS, C.SHADOW)
