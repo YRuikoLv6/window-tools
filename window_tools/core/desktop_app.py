@@ -25,6 +25,7 @@ from .. import __version__
 from ..paths import ICON_PATH
 from ..ui import gdi
 from ..ui.gdi import C
+from ..ui.toast import ToastWindow
 from ..ui.tray import (
     TRAY_EXIT, TRAY_HIDE, TRAY_MOUSE_TOGGLE, TRAY_RESCUE, TRAY_SHOW,
     TrayIcon, TrayMenu, WM_TRAYICON,
@@ -191,6 +192,7 @@ class DesktopApp:
 
         self.tray: TrayIcon | None = None
         self.tray_menu: TrayMenu | None = None
+        self.toast: ToastWindow | None = None
 
         # 关闭确认对话框（模态覆盖层）与托盘“退出程序”直通标志
         self._dialog: dict | None = None
@@ -389,6 +391,16 @@ class DesktopApp:
         self.log.info("[通知] %s - %s", title, message)
         self._invalidate()
 
+    def show_toast(self, message: str, title: str | None = None,
+                   tone: str = "info") -> None:
+        """屏幕左上角悬浮提示；与窗口内通知列表独立。"""
+        if not self.toast:
+            return
+        try:
+            self.toast.show(title or self.title, message, tone)
+        except Exception:
+            self.log.exception("左上角提示显示失败")
+
     def note_display_change(self) -> None:
         self.last_display_change = time.time()
 
@@ -469,6 +481,13 @@ class DesktopApp:
         except Exception:
             self.log.exception("系统托盘初始化失败")
 
+        # 左上角 toast：供鼠标锁定/解锁等操作给出悬浮反馈
+        try:
+            self.toast = ToastWindow(self.log)
+            self.log.info("左上角提示窗已创建")
+        except Exception:
+            self.log.exception("左上角提示窗创建失败")
+
         if self.manager:
             self.manager.load_all()
         self._sync_tools()
@@ -488,6 +507,8 @@ class DesktopApp:
         try:
             win32gui.PumpMessages()
         finally:
+            if self.toast:
+                self.toast.close()
             if self.tray:
                 self.tray.remove()
             if self.manager:

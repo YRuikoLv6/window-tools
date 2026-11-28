@@ -279,6 +279,20 @@ def selftest(log) -> int:
     except Exception as exc:
         checks.append(("GDI 文字测量", False, str(exc)))
 
+    # 左上角提示窗：创建/show(含绘制)/定位/关闭全程不崩溃
+    try:
+        from window_tools.ui.toast import ToastWindow
+        toast = ToastWindow(log)
+        created = bool(toast.hwnd)
+        toast.show("鼠标已锁定", "测试提示", "success")
+        rect = win32gui.GetWindowRect(toast.hwnd)
+        left_ok = rect[0] >= 0 and rect[1] >= 0 and rect[0] < 400 and rect[1] < 400
+        toast.close()
+        checks.append(("左上角提示窗", created and left_ok and not toast.hwnd,
+                       f"({rect[0]},{rect[1]})"))
+    except Exception as exc:
+        checks.append(("左上角提示窗", False, str(exc)))
+
     failed = [name for name, passed, _ in checks if not passed]
     for name, passed, detail in checks:
         log.info("%s %s - %s", "PASS" if passed else "FAIL", name, detail)

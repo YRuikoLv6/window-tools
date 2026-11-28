@@ -144,11 +144,18 @@ class MouseLockTool(BaseTool):
         else:
             self.disable()
 
+    def _toast(self, message: str, tone: str = "info") -> None:
+        """左上角悬浮提示；自检桩等无该能力时静默跳过。"""
+        show = getattr(self.app, "show_toast", None)
+        if show:
+            show(message, self.name, tone)
+
     def enable(self, persist: bool = True, notify: bool = True) -> None:
         rect = self._resolve_rect(force=True)
         if not rect:
             if notify:
                 self.app.notify("未检测到可用显示器，锁定失败", self.name)
+                self._toast("未检测到可用显示器，锁定失败", "warning")
             return
         with self._guard:
             was_enabled = self.enabled
@@ -162,6 +169,7 @@ class MouseLockTool(BaseTool):
             if hint:
                 suffix += f"，按 {hint} 可解锁"
             self.app.notify("鼠标已锁定到当前屏幕" + suffix, self.name)
+            self._toast("鼠标已锁定到当前屏幕" + suffix, "success")
 
     def disable(self, persist: bool = True, notify: bool = True) -> None:
         with self._guard:
@@ -173,6 +181,8 @@ class MouseLockTool(BaseTool):
             self._persist()
         if notify and was_enabled:
             self.app.notify("鼠标已解锁，可自由移动到其他屏幕", self.name)
+        if notify:
+            self._toast("鼠标已解锁，可自由移动到其他屏幕", "info")
 
     def unlock(self) -> None:
         """强制解锁：即使当前状态显示未锁定，也确保 ClipCursor 被释放。"""
